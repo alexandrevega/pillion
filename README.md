@@ -1,4 +1,8 @@
-# Pillion 🏍️📱→📺
+<p align="center">
+  <img src="art/icon.png" alt="Pillion logo" width="150" height="150">
+</p>
+
+<h1 align="center">Pillion 🏍️📱→📺</h1>
 
 **Cast your phone's screen to a Yamaha motorcycle TFT dash over Bluetooth** — so you can run
 Waze, Google Maps, or anything else on the bike's built-in display instead of being limited to
