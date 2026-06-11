@@ -31,9 +31,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -46,9 +48,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.pillion.core.AppInfo
 import app.pillion.core.MirrorController
 import app.pillion.core.MirrorSettings
 import app.pillion.core.MirrorState
+import app.pillion.core.UpdateChecker
+import app.pillion.core.UpdateInfo
 import kotlin.math.roundToInt
 
 /** The public GitHub repository — shown in-app so anyone can read the source. */
@@ -85,7 +90,7 @@ private val LightColors = lightColorScheme(
 )
 
 @Composable
-fun App(controller: MirrorController) {
+fun App(controller: MirrorController, updateChecker: UpdateChecker? = null) {
     MaterialTheme(colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             val state by controller.state.collectAsState()
@@ -93,7 +98,11 @@ fun App(controller: MirrorController) {
             var maxFps by rememberSaveable { mutableStateOf(15) }
             var showSettings by rememberSaveable { mutableStateOf(false) }
             var showDisclaimer by rememberSaveable { mutableStateOf(true) }
+            var update by remember { mutableStateOf<UpdateInfo?>(null) }
 
+            LaunchedEffect(updateChecker) {
+                update = updateChecker?.newerThan(AppInfo.VERSION)
+            }
             BackHandler(enabled = showSettings) { showSettings = false }
 
             if (showSettings) {
@@ -107,6 +116,7 @@ fun App(controller: MirrorController) {
             } else {
                 HomeScreen(
                     state = state,
+                    update = update,
                     onOpenSettings = { showSettings = true },
                     onStart = { controller.start(MirrorSettings(quality, maxFps)) },
                     onStop = controller::stop,
@@ -121,6 +131,7 @@ fun App(controller: MirrorController) {
 @Composable
 private fun HomeScreen(
     state: MirrorState,
+    update: UpdateInfo?,
     onOpenSettings: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
@@ -136,6 +147,10 @@ private fun HomeScreen(
             IconButton(onClick = onOpenSettings, modifier = Modifier.align(Alignment.TopEnd)) {
                 Text("⚙", fontSize = 22.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+        }
+        if (update != null) {
+            Spacer(Modifier.height(12.dp))
+            UpdateBanner(update)
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (state is MirrorState.Idle) {
@@ -206,6 +221,57 @@ private fun ExperimentalDialog(onDismiss: () -> Unit) {
             TextButton(onClick = onDismiss) { Text("I understand") }
         },
     )
+}
+
+@Composable
+private fun UpdateBanner(update: UpdateInfo) {
+    val uriHandler = LocalUriHandler.current
+    var expanded by remember { mutableStateOf(false) }
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Update available",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(update.version, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+                Button(
+                    onClick = { uriHandler.openUri(update.url) },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    ),
+                ) {
+                    Text("Get", fontWeight = FontWeight.SemiBold)
+                }
+            }
+            if (update.notes.isNotBlank()) {
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(
+                        if (expanded) "Hide changelog" else "What's new",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (expanded) {
+                    Text(
+                        update.notes,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -392,6 +458,12 @@ private fun AboutSection() {
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(Modifier.height(8.dp))
+        Text(
+            "Version ${AppInfo.VERSION}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.height(6.dp))
         Text(
             "Pillion mirrors your phone screen to a Garmin-powered motorcycle dash over Bluetooth. " +
                 "It's experimental and open source — not affiliated with, or endorsed by, Yamaha or Garmin.",
