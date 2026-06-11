@@ -4,6 +4,17 @@
 
 <h1 align="center">Pillion</h1>
 
+<p align="center">
+  <img src="https://img.shields.io/badge/status-alpha-orange" alt="alpha">
+  <img src="https://img.shields.io/badge/platform-Android-3DDC84" alt="Android">
+  <img src="https://img.shields.io/badge/iOS-planned-lightgrey" alt="iOS planned">
+  <img src="https://img.shields.io/badge/license-PolyForm%20NC-blue" alt="PolyForm Noncommercial">
+</p>
+
+> **🚧 Alpha.** Android-only for now and under active development — it works on my MT-07 (2025) but is
+> rough, and the protocol/UI may still change. **iOS support is planned.** Expect bugs, and please
+> [report them](../../issues) (especially compatibility on other bikes).
+
 **Cast your phone's screen to a Yamaha motorcycle TFT dash over Bluetooth** — so you can run
 Waze, Google Maps, or anything else on the bike's built-in display instead of being limited to
 Garmin StreetCross.
@@ -54,6 +65,12 @@ The auth is universal — there is **no per-bike key or pairing secret** to extr
 
 > Note: only run **one** projection app at a time — close Garmin StreetCross / Yamaha MyRide first,
 > or they'll fight Pillion for the connection.
+
+## Updates
+
+Pillion checks **[GitHub Releases](../../releases)** once on launch and shows an in-app **"Update
+available"** banner (with the changelog) when a newer build exists — tap **Get** to download the new
+APK. Each release also lists what changed; see **[CHANGELOG.md](CHANGELOG.md)**.
 
 ## How it works
 
