@@ -56,11 +56,11 @@ class CaptureService : Service() {
 
         val quality = intent?.getIntExtra(EXTRA_QUALITY, 40) ?: 40
         val maxFps = intent?.getIntExtra(EXTRA_MAX_FPS, 15) ?: 15
-        val mirror = MirrorEngine(
-            RfcommByteChannel(),
-            MediaProjectionScreenSource(this, projection, quality),
-            maxFps,
-        )
+        // Create the virtual display NOW, while the projection token is fresh — deferring it behind
+        // the Bluetooth handshake makes Android 14/15 invalidate the projection (blank dash).
+        val screen = MediaProjectionScreenSource(this, projection, quality)
+        runCatching { screen.start() }
+        val mirror = MirrorEngine(RfcommByteChannel(), screen, maxFps)
         engine = mirror
         scope.launch {
             mirror.state.collect { state ->

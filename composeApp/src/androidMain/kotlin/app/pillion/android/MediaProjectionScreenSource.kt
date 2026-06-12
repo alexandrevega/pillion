@@ -10,6 +10,7 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Log
 import app.pillion.core.ScreenSource
 import java.io.ByteArrayOutputStream
 
@@ -30,8 +31,11 @@ class MediaProjectionScreenSource(
     @Volatile private var latest: Bitmap? = null
 
     override fun start() {
+        if (display != null) return // idempotent: capture may be pre-started by the service
         // Android 14+ requires a registered callback before createVirtualDisplay.
-        projection.registerCallback(object : MediaProjection.Callback() {}, handler)
+        projection.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() { Log.w(TAG, "screen: projection stopped by the system") }
+        }, handler)
         val r = ImageReader.newInstance(WIDTH, HEIGHT, PixelFormat.RGBA_8888, 2)
         r.setOnImageAvailableListener({ ir -> capture(ir) }, handler)
         reader = r
@@ -40,14 +44,17 @@ class MediaProjectionScreenSource(
             "pillion", WIDTH, HEIGHT, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler,
         )
+        Log.d(TAG, "screen: virtual display created (${WIDTH}x$HEIGHT)")
     }
 
     private fun capture(ir: ImageReader) {
         val image = ir.acquireLatestImage() ?: return
         try {
+            val first = latest == null
             latest = toBitmap(image)
-        } catch (_: Throwable) {
-            // a dropped frame is harmless; the next one arrives shortly
+            if (first) Log.d(TAG, "screen: first frame captured")
+        } catch (t: Throwable) {
+            Log.w(TAG, "screen: dropped a frame", t)
         } finally {
             image.close()
         }
@@ -84,5 +91,6 @@ class MediaProjectionScreenSource(
         const val WIDTH = 480
         const val HEIGHT = 240
         const val DEFAULT_QUALITY = 40
+        const val TAG = "Pillion"
     }
 }

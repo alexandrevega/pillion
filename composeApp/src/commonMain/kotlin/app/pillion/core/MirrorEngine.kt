@@ -37,12 +37,19 @@ class MirrorEngine(
         _state.value = MirrorState.Connecting
         job = scope.launch(Dispatchers.Default) {
             try {
+                // Start capture FIRST: a MediaProjection token goes stale if the virtual display
+                // isn't created promptly, so we must not defer it behind the Bluetooth handshake.
+                Logger.d("session: starting screen capture")
+                screen.start()
+                Logger.d("session: connecting transport")
                 channel.open()
                 val reader = FrameReader(channel)
+                Logger.d("session: handshake")
                 Handshake(channel, reader).perform()
-                screen.start()
+                Logger.d("session: streaming")
                 streamLoop(reader)
             } catch (t: Throwable) {
+                Logger.e("session failed", t)
                 if (running) _state.value = MirrorState.Error(t.message ?: "connection lost")
             } finally {
                 running = false
@@ -61,23 +68,32 @@ class MirrorEngine(
 
     private fun streamLoop(reader: FrameReader) {
         var frames = 0
+        var acks = 0
+        var waitedForFrame = false
         var windowStart = nowMs()
         var lastSend = 0L
         while (running) {
             val jpeg = screen.latestFrame()
-            if (jpeg == null) { sleepMs(15); continue }
+            if (jpeg == null) {
+                if (!waitedForFrame) { Logger.d("session: waiting for first screen frame"); waitedForFrame = true }
+                sleepMs(15)
+                continue
+            }
             if (minIntervalMs > 0L) {
                 val wait = minIntervalMs - (nowMs() - lastSend)
                 if (wait > 0L) sleepMs(wait)
             }
             lastSend = nowMs()
             sendImage(jpeg)
-            awaitAck(reader)
+            if (seq == 2) Logger.d("session: first image sent (${jpeg.size} bytes)")
+            if (awaitAck(reader)) acks++
             frames++
             val elapsed = nowMs() - windowStart
             if (elapsed >= 1000) {
+                Logger.d("session: ${frames} frames, ${acks} acks, ${jpeg.size / 1024} KB/frame")
                 _state.value = MirrorState.Streaming(frames * 1000.0 / elapsed, jpeg.size / 1024)
                 frames = 0
+                acks = 0
                 windowStart = nowMs()
             }
         }
@@ -93,11 +109,12 @@ class MirrorEngine(
         channel.write(NaviLiteCodec.build(FRAME_TYPE_PHONE, ServiceType.IMAGE, PDT_POINTER, payload))
     }
 
-    private fun awaitAck(reader: FrameReader) {
+    private fun awaitAck(reader: FrameReader): Boolean {
         var guard = 0
         while (running && guard++ < ACK_FRAME_GUARD) {
-            if (reader.next().serviceType == ServiceType.IMAGE_ACK) return
+            if (reader.next().serviceType == ServiceType.IMAGE_ACK) return true
         }
+        return false
     }
 
     private companion object {

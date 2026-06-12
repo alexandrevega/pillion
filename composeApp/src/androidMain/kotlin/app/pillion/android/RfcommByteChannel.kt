@@ -3,6 +3,7 @@ package app.pillion.android
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothSocket
+import android.util.Log
 import app.pillion.core.ByteChannel
 import java.io.InputStream
 import java.io.OutputStream
@@ -24,12 +25,16 @@ class RfcommByteChannel : ByteChannel {
             val n = d.name
             n != null && (n.startsWith("YCCU") || n.contains("CCU"))
         } ?: error("dash (YCCU…) is not paired")
-        adapter.cancelDiscovery()
+        Log.d("Pillion", "rfcomm: connecting to ${dash.name}")
+        // cancelDiscovery() needs BLUETOOTH_SCAN on Android 12+; it's only a connect-speed
+        // optimization (nothing is discovering here), so ignore it if the permission is absent.
+        runCatching { adapter.cancelDiscovery() }
         val s = dash.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
         s.connect()
         socket = s
         input = s.inputStream
         output = s.outputStream
+        Log.d("Pillion", "rfcomm: connected")
     }
 
     override fun write(bytes: ByteArray) {
