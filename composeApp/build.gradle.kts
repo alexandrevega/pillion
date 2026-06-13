@@ -16,8 +16,12 @@ kotlin {
         }
     }
 
-    // iOS targets are added in a later phase (keeps the Android build fast & avoids the
-    // Kotlin/Native toolchain download). The shared code in commonMain is already platform-agnostic.
+    listOf(iosX64(), iosArm64(), iosSimulatorArm64()).forEach { iosTarget ->
+        iosTarget.binaries.framework {
+            baseName = "ComposeApp"
+            isStatic = true
+        }
+    }
 
     sourceSets {
         androidMain.dependencies {

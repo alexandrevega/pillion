@@ -4,6 +4,7 @@ import app.pillion.protocol.FRAME_TYPE_PHONE
 import app.pillion.protocol.NaviLiteCodec
 import app.pillion.protocol.PDT_POINTER
 import app.pillion.protocol.ServiceType
+import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
