@@ -9,6 +9,7 @@
   <img src="https://img.shields.io/badge/platform-Android-3DDC84" alt="Android">
   <img src="https://img.shields.io/badge/iOS-planned-lightgrey" alt="iOS planned">
   <img src="https://img.shields.io/badge/license-PolyForm%20NC-blue" alt="PolyForm Noncommercial">
+  <a href="https://discord.gg/mxNV97QUnB"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white" alt="Join the Discord"></a>
 </p>
 
 > **🚧 Alpha.** Android-only for now and under active development — it works on my MT-07 (2025) but is
@@ -109,6 +110,11 @@ purposes. Commercial use requires a separate license. This is a hobby / interope
   observed protocol and original documentation of it.
 - Provided **as-is, with no warranty.** Use at your own risk; you are responsible for safe and lawful
   use. See [LICENSE.md](LICENSE.md) and [SAFETY.md](SAFETY.md).
+
+## Community
+
+Questions, setup help, or a compatibility report? **[Join the Discord](https://discord.gg/mxNV97QUnB)** 💬
+— there's a support forum, bike-specific roles, and release announcements.
 
 ## Contributing
 
