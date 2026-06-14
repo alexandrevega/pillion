@@ -1,8 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Network: only used for the in-app update check against GitHub Releases -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Dash mode: find which app to promote when the screen is blocked (the foreground app).
+         Special access, granted by the user in Settings → Usage access. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- Bluetooth: connect to the already-bonded dash (no scanning needed) -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />

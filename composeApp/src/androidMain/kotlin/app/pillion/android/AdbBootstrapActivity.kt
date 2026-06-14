@@ -1,5 +1,7 @@
 package app.pillion.android
 
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -56,6 +58,7 @@ class AdbBootstrapActivity : ComponentActivity() {
         var host by remember { mutableStateOf("127.0.0.1") }
         var pairPort by remember { mutableStateOf("") }
         var code by remember { mutableStateOf("") }
+        var pkg by remember { mutableStateOf("") }
         var log by remember { mutableStateOf("Enable Wireless debugging, then pair below.\n") }
 
         fun append(line: String) { log += line + "\n" }
@@ -119,8 +122,54 @@ class AdbBootstrapActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("3. Run test shell command") }
 
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                pkg, { pkg = it },
+                label = { Text("App package (blank = foreground app)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = {
+                    scope.launch {
+                        val target = pkg.trim().ifBlank { foregroundPackage() }
+                        if (target == null) { append("❌ No foreground app (grant Usage access)"); return@launch }
+                        val component = packageManager.getLaunchIntentForPackage(target)?.component?.flattenToString()
+                        if (component == null) { append("❌ $target has no launcher activity"); return@launch }
+                        append("Promoting $component to a trusted display…")
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                val cmd = "CLASSPATH=\$(pm path app.pillion | grep base.apk | cut -d: -f2) " +
+                                    "app_process / app.pillion.server.DashServer 480 240 160 $component"
+                                PillionAdb.getInstance(applicationContext).openShellStream(cmd)
+                                    .openInputStream().bufferedReader().forEachLine { line ->
+                                        runOnUiThread { append("helper: $line") }
+                                    }
+                            }
+                        }.onFailure { append("❌ Helper failed: ${it.message}") }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("4. Launch dash helper (promote foreground app)") }
+
             Spacer(Modifier.height(16.dp))
             Text(log, style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
         }
+    }
+
+    /** The most recent foreground package other than Pillion (the app to promote at screen-block). */
+    private fun foregroundPackage(): String? {
+        val usm = getSystemService(UsageStatsManager::class.java) ?: return null
+        val now = System.currentTimeMillis()
+        val events = runCatching { usm.queryEvents(now - 60_000, now) }.getOrNull() ?: return null
+        val event = UsageEvents.Event()
+        var pkg: String? = null
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            @Suppress("DEPRECATION")
+            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND && event.packageName != packageName) {
+                pkg = event.packageName
+            }
+        }
+        return pkg
     }
 }

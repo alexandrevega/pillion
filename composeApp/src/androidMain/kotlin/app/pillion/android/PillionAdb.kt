@@ -70,6 +70,12 @@ class PillionAdb private constructor(
         }
     }
 
+    /**
+     * Open a long-lived shell stream (e.g. to spawn the [app.pillion.server.DashServer] helper). The
+     * caller owns the returned stream and must close it to terminate the remote process.
+     */
+    fun openShellStream(command: String): AdbStream = openStream("shell:$command")
+
     companion object {
         @Volatile private var instance: PillionAdb? = null
 
