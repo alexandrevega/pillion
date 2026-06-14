@@ -18,6 +18,8 @@
     <!-- Foreground service hosting MediaProjection screen capture -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Dedicated-dash mode streams to the Bluetooth dash with no MediaProjection. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
@@ -47,6 +49,6 @@
         <service
             android:name="app.pillion.android.CaptureService"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
+            android:foregroundServiceType="mediaProjection|connectedDevice" />
     </application>
 </manifest>
