@@ -31,6 +31,13 @@
             </intent-filter>
         </activity>
 
+        <!-- Dev-only: in-app ADB bootstrap proof (Milestone 1). Launch via:
+             adb shell am start -n app.pillion/app.pillion.android.AdbBootstrapActivity -->
+        <activity
+            android:name="app.pillion.android.AdbBootstrapActivity"
+            android:exported="true"
+            android:label="Pillion ADB setup (dev)" />
+
         <service
             android:name="app.pillion.android.CaptureService"
             android:exported="false"

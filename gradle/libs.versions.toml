@@ -7,10 +7,19 @@ androidx-activityCompose = "1.9.3"
 compose-multiplatform = "1.7.3"
 kotlin = "2.1.0"
 coroutines = "1.9.0"
+libadb = "3.1.1"
+# Match the BouncyCastle variant/version libadb-android pulls transitively (bcprov-jdk15to18:1.81)
+# to avoid duplicate classes; we add bcpkix (cert builder) from the same line.
+bouncycastle = "1.81"
+conscrypt = "2.5.3"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activityCompose" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+# In-app ADB client with Android 11+ wireless-debugging pairing (SPAKE2). Powers the dash bootstrap.
+libadb-android = { module = "com.github.MuntashirAkon:libadb-android", version.ref = "libadb" }
+bouncycastle-pkix = { module = "org.bouncycastle:bcpkix-jdk15to18", version.ref = "bouncycastle" }
+conscrypt-android = { module = "org.conscrypt:conscrypt-android", version.ref = "conscrypt" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }
