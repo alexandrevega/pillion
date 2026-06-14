@@ -139,7 +139,7 @@ class AdbBootstrapActivity : ComponentActivity() {
                         runCatching {
                             withContext(Dispatchers.IO) {
                                 val cmd = "CLASSPATH=\$(pm path app.pillion | grep base.apk | cut -d: -f2) " +
-                                    "app_process / app.pillion.server.DashServer 480 240 160 $component"
+                                    "app_process / app.pillion.server.DashServer 480 240 160 40 $component"
                                 PillionAdb.getInstance(applicationContext).openShellStream(cmd)
                                     .openInputStream().bufferedReader().forEachLine { line ->
                                         runOnUiThread { append("helper: $line") }
@@ -150,6 +150,32 @@ class AdbBootstrapActivity : ComponentActivity() {
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("4. Launch dash helper (promote foreground app)") }
+
+            Button(
+                onClick = {
+                    scope.launch {
+                        append("Connecting to capture socket…")
+                        withContext(Dispatchers.IO) {
+                            val src = DashSocketScreenSource()
+                            src.start()
+                            var got = 0
+                            repeat(20) {
+                                Thread.sleep(300)
+                                val f = src.latestFrame()
+                                if (f != null) {
+                                    got++
+                                    if (got <= 3) runOnUiThread { append("frame: ${f.size} bytes") }
+                                }
+                            }
+                            src.stop()
+                            runOnUiThread {
+                                append(if (got > 0) "✅ Received $got frame samples" else "❌ No frames (helper running?)")
+                            }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("5. Read capture stream (test)") }
 
             Spacer(Modifier.height(16.dp))
             Text(log, style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
