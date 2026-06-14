@@ -10,6 +10,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.LocalUriHandler
 import app.pillion.core.AppInfo
+import app.pillion.core.DashSetup
 import app.pillion.core.MirrorController
 import app.pillion.core.MirrorSettings
 import app.pillion.core.SettingsStore
@@ -30,6 +31,7 @@ fun App(
     controller: MirrorController,
     updateChecker: UpdateChecker? = null,
     settingsStore: SettingsStore? = null,
+    dashSetup: DashSetup? = null,
 ) {
     var themeMode by remember { mutableStateOf(settingsStore?.themeMode() ?: ThemeMode.SYSTEM) }
     PillionTheme(themeMode) {
@@ -37,15 +39,30 @@ fun App(
         var quality by rememberSaveable { mutableStateOf(40) }
         var maxFps by rememberSaveable { mutableStateOf(15) }
         var showSettings by rememberSaveable { mutableStateOf(false) }
+        var showDashOnboarding by rememberSaveable { mutableStateOf(false) }
+        var dashEnabled by remember { mutableStateOf(settingsStore?.dashEnabled() ?: false) }
         var showDisclaimer by rememberSaveable { mutableStateOf(true) }
         var update by remember { mutableStateOf<UpdateInfo?>(null) }
         var updateDismissed by rememberSaveable { mutableStateOf(false) }
         val uriHandler = LocalUriHandler.current
 
         LaunchedEffect(updateChecker) { update = updateChecker?.newerThan(AppInfo.VERSION) }
-        BackHandler(enabled = showSettings) { showSettings = false }
+        BackHandler(enabled = showSettings || showDashOnboarding) {
+            if (showDashOnboarding) showDashOnboarding = false else showSettings = false
+        }
 
-        if (showSettings) {
+        if (showDashOnboarding && dashSetup != null) {
+            DashOnboarding(
+                dash = dashSetup,
+                settings = MirrorSettings(quality, maxFps),
+                onOptOut = {
+                    dashEnabled = false; settingsStore?.setDashEnabled(false); showDashOnboarding = false
+                },
+                onFinish = {
+                    dashEnabled = true; settingsStore?.setDashEnabled(true); showDashOnboarding = false
+                },
+            )
+        } else if (showSettings) {
             SettingsScreen(
                 quality = quality,
                 onQuality = { quality = it },
@@ -53,6 +70,10 @@ fun App(
                 onMaxFps = { maxFps = it },
                 themeMode = themeMode,
                 onThemeMode = { themeMode = it; settingsStore?.setThemeMode(it) },
+                dashSupported = dashSetup != null,
+                dashEnabled = dashEnabled,
+                onSetUpDash = { showDashOnboarding = true },
+                onDisableDash = { dashEnabled = false; settingsStore?.setDashEnabled(false) },
                 update = update,
                 onBack = { showSettings = false },
             )

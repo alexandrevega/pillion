@@ -7,4 +7,8 @@ package app.pillion.core
 interface SettingsStore {
     fun themeMode(): ThemeMode
     fun setThemeMode(mode: ThemeMode)
+
+    /** Whether the user has opted into "dedicated dash display" mode (completed onboarding). */
+    fun dashEnabled(): Boolean
+    fun setDashEnabled(enabled: Boolean)
 }

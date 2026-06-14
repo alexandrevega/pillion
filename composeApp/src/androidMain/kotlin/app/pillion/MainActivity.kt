@@ -9,6 +9,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import app.pillion.android.AndroidDashSetup
 import app.pillion.android.AndroidMirrorController
 import app.pillion.android.AndroidSettingsStore
 import app.pillion.android.CaptureService
@@ -52,7 +53,8 @@ class MainActivity : ComponentActivity() {
         val controller = AndroidMirrorController(onStart = ::startMirroring, onStop = ::stopMirroring)
         val updateChecker = GitHubUpdateChecker(AppInfo.REPO)
         val settingsStore = AndroidSettingsStore(applicationContext)
-        setContent { App(controller, updateChecker, settingsStore) }
+        val dashSetup = AndroidDashSetup(applicationContext)
+        setContent { App(controller, updateChecker, settingsStore, dashSetup) }
     }
 
     private fun startMirroring(settings: MirrorSettings) {

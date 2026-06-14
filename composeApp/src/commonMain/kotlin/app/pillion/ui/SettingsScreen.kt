@@ -28,6 +28,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -60,6 +61,10 @@ internal fun SettingsScreen(
     onMaxFps: (Int) -> Unit,
     themeMode: ThemeMode,
     onThemeMode: (ThemeMode) -> Unit,
+    dashSupported: Boolean = false,
+    dashEnabled: Boolean = false,
+    onSetUpDash: () -> Unit = {},
+    onDisableDash: () -> Unit = {},
     update: UpdateInfo?,
     onBack: () -> Unit,
 ) {
@@ -156,6 +161,45 @@ internal fun SettingsScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(start = 6.dp, top = 8.dp, end = 6.dp),
         )
+
+        if (dashSupported) {
+            Spacer(Modifier.height(24.dp))
+            SectionHeader("Dedicated dash display (experimental)")
+            SettingsGroup {
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (dashEnabled) "On" else "Off",
+                            style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            "Keep your nav app on the dash with the phone screen off.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (dashEnabled) {
+                        OutlinedButton(onClick = onDisableDash, shape = RoundedCornerShape(12.dp)) { Text("Disable") }
+                    } else {
+                        Button(onClick = onSetUpDash, shape = RoundedCornerShape(12.dp)) { Text("Set up") }
+                    }
+                }
+                if (dashEnabled) {
+                    GroupDivider()
+                    LinkRow("Re-run setup (after a restart)") { onSetUpDash() }
+                }
+            }
+            Text(
+                "Casts the real app to the dash in landscape with the screen off. Needs a one-time " +
+                    "Wireless-debugging setup before each ride, redone after a phone restart.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 6.dp, top = 8.dp, end = 6.dp),
+            )
+        }
 
         Spacer(Modifier.height(24.dp))
         SectionHeader("About")

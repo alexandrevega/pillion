@@ -16,7 +16,14 @@ class AndroidSettingsStore(context: Context) : SettingsStore {
         prefs.edit().putString(KEY_THEME, mode.name).apply()
     }
 
+    override fun dashEnabled(): Boolean = prefs.getBoolean(KEY_DASH_ENABLED, false)
+
+    override fun setDashEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_DASH_ENABLED, enabled).apply()
+    }
+
     private companion object {
         const val KEY_THEME = "theme_mode"
+        const val KEY_DASH_ENABLED = "dash_enabled"
     }
 }
