@@ -71,6 +71,7 @@ A receiver should distinguish four different non-success states before handing a
 | StreetCross-validated extension | The service id is accepted by low-level StreetCross validation tables, but no public Java constant, native packer, or high-level dispatch handler has been identified.                                                                           | Log frame type, service id, payload data type, length, and a short hex prefix; keep the connection alive. Do not invent semantics without live captures. |
 | unknown service                 | The service id is not in the documented service table and was not found in StreetCross validation tables.                                                                                                                                        | Log the raw service id and payload metadata, then ignore safely.                                                                                         |
 | malformed known service         | The service id is known, but the payload data type, length, or required content does not match the native unpacker branch.                                                                                                                       | Reject the command and log the exact reason. This maps most closely to native unpack status `5` or `6`.                                                  |
+
 ## Frame Types
 
 | Name            | ID | Direction     | Source      | Notes                                    |
@@ -150,6 +151,17 @@ StreetCross contains low-level validation tables that accept additional service 
 |-----------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `43`, `45`, `47`, `57`, `67`, `68`, `71...79`, `85...90`, `95`, `100...122` | Present in StreetCross validation tables (`i7/f.java`, `e4/b.java`) but absent from `NaviLiteServiceType` symbols and native `NaviLiteMessagePacker` exports. | Classify as StreetCross-validated extensions, include raw frame type, payload data type, payload length, and a short payload hex prefix in diagnostics, and continue normal protocol operation. |
 | `100`, `101`, `102`                                                         | Also appear in an Okio/buffer prefix table (`mb/a.java`) alongside app command and POI data services. No payload packer or dispatch handler was found.        | Same as above; do not assume they are additional POI data services without live evidence.                                                                                                          |
+## Vehicle Model Detection
+
+The model is derived during authentication from the `lcSwPartNumber` / `SW_Part_Number` value received with `AUTH_REQUEST_SEC_DATA` service `83`:
+
+| StreetCross enum | Ordinal | `SW_Part_Number` substring | Behavior |
+|------------------|--------:|----------------------------|-----|
+| `MODEL_IXWW22`   | 0       | `006-B3952`                | Uses the base LinkCard map layout 480px by 234px. Sends the simpler `NEXT_TURN_DIST_UPDATE` service `4`. |
+| `MODEL_IMWW23`   | 1       | `006-B4160` or `006-B4920` | Uses `layout_imww23_map` 480px by 240px. Sends richer `NAVIGATION_INFO_UPDATE` service `19`, including remaining distance/time and lane bytes. |
+| `MODEL_INVALID`  | 2       | any other or missing value | Falls back to base dimensions/layout and reports an invalid model to callbacks. |
+
+After model detection, StreetCross calls `setHeadunitVehicleInfo` in Garmin OS with the enum ordinal plus height and width. Compatible implementations should treat the software part number as the proven model source and keep service `69` as diagnostic data until real hardware logs prove additional semantics. If the software part number cannot be parsed, compatibility mode should keep both service `4` and service `19` enabled; once the model is known, mirror StreetCross and send service `4` only for `MODEL_IXWW22`/`MODEL_INVALID`, or service `19` only for `MODEL_IMWW23`.
 
 ## Content Types
 
@@ -288,13 +300,13 @@ Send each frame as **`IMAGE_FRAME_UPDATE` (service 0, `POINTER`)**:
  offset  size  field
    0      1    imageType   observed 3 = expanded navigation view
    1      2    sequence    uint16, little-endian, increments per frame
-   3    var    jpeg        baseline JPEG, 480 × 240
+   3    var    jpeg        baseline JPEG, 480 × 240 or 480 × 236
 ```
 
 The dash decodes the JPEG and replies **`IMAGE_ACK` (80)**. The sender waits for the ack (skipping any
 other frames that arrive) before sending the next image, which naturally paces throughput.
 
-- **Resolution:** 480 × 240.
+- **Resolution:** 480 × 240 or 480 × 236.
 - **Throughput:** roughly **14–15 fps** at JPEG quality ≈ 40 on a fast phone over Bluetooth; higher
   quality → larger frames → fewer fps. The frame rate emerges from encode + Bluetooth throughput; it
   is not commanded.
@@ -309,7 +321,7 @@ dash → AUTH_REQUEST_SEC_DATA(83)        # ("partnumber"+nonce) XOR 0x0A
 phone → AUTH_REQUEST_SEC_DATA_ACK(84)   # nonce XOR 0x0A
 phone → setup burst (nav status, day/night, gps, zoom, ...)
 loop:
-  phone → IMAGE_FRAME_UPDATE(0)         # imageType + seq + JPEG(480x240)
+  phone → IMAGE_FRAME_UPDATE(0)         # imageType + seq + JPEG(480x240 or 480×236)
   dash  → IMAGE_ACK(80)
 ```
 
