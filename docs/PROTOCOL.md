@@ -68,8 +68,7 @@ A receiver should distinguish four different non-success states before handing a
 | Classification                  | Meaning | Recommended behavior |
 |---------------------------------|-----------------------| --- |
 | unsupported known service       | The service id is a documented NaviLite service, but it is not an executable dashboard command in the current receiver path. Examples include `IMAGE_FRAME_UPDATE_ACK`, `AUTH_REQUEST_ACK`, or other handshake/image services handled elsewhere. | Do not treat as an unknown command. Route it to the responsible subsystem or log it as a known-but-not-actionable service.                         |
-| StreetCross-validated extension | The service id is accepted by low-level StreetCross validation tables, but no public Java constant, native packer, or high-level dispatch handler has been identified.                                                                           | Log frame type, service id, payload data type, length, and a short hex prefix; keep the connection alive. Do not invent semantics without live captures. |
-| unknown service                 | The service id is not in the documented service table and was not found in StreetCross validation tables.                                                                                                                                        | Log the raw service id and payload metadata, then ignore safely.                                                                                         |
+| unknown service                 | The service id is not in the documented service table.                                                                                                                                                                                           | Log the raw service id and payload metadata, then ignore safely.                                                                                         |
 | malformed known service         | The service id is known, but the payload data type, length, or required content does not match the native unpacker branch.                                                                                                                       | Reject the command and log the exact reason. This maps most closely to native unpack status `5` or `6`.                                                  |
 
 ## Frame Types
@@ -143,14 +142,6 @@ A receiver should distinguish four different non-success states before handing a
 
 Reference: [`ServiceType.kt`](../composeApp/src/commonMain/kotlin/app/pillion/protocol/ServiceType.kt).
 
-## StreetCross-Validated Extension Service IDs
-
-StreetCross contains low-level validation tables that accept additional service ids even though no Java constants, public packer methods, or high-level handlers were found for them in StreetCross 1.86 or `libnaviliteprotocol.so`. Treat these as reserved or extension ids until live captures prove a payload meaning. They should be logged and ignored safely, not assigned guessed semantics.
-
-| IDs | Evidence | Implementation guidance |
-|-----------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `43`, `45`, `47`, `57`, `67`, `68`, `71...79`, `85...90`, `95`, `100...122` | Present in StreetCross validation tables (`i7/f.java`, `e4/b.java`) but absent from `NaviLiteServiceType` symbols and native `NaviLiteMessagePacker` exports. | Classify as StreetCross-validated extensions, include raw frame type, payload data type, payload length, and a short payload hex prefix in diagnostics, and continue normal protocol operation. |
-| `100`, `101`, `102`                                                         | Also appear in an Okio/buffer prefix table (`mb/a.java`) alongside app command and POI data services. No payload packer or dispatch handler was found.        | Same as above; do not assume they are additional POI data services without live evidence.                                                                                                          |
 ## Vehicle Model Detection
 
 The model is derived during authentication from the `lcSwPartNumber` / `SW_Part_Number` value received with `AUTH_REQUEST_SEC_DATA` service `83`:
