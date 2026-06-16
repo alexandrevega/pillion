@@ -73,7 +73,6 @@ internal fun DashOnboarding(
 ) {
     val state by dash.state.collectAsState()
     var step by remember { mutableStateOf(0) }
-    var port by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -92,32 +91,35 @@ internal fun DashOnboarding(
                 hero = { ScreenshotHero(Res.drawable.dash_step_toggle) },
                 title = "Turn on Wireless debugging",
                 subtitle = "In Settings → System → Developer options, switch on Wireless debugging. " +
-                    "Do this on Wi-Fi (your home network or a hotspot) — it's a one-time, no-PC setup.",
+                    "Pillion will keep a notification open so you can enter the pairing code without " +
+                    "leaving Settings.",
                 step = 1,
-                primary = "Next" to { step = 2 },
+                primary = "Open settings" to {
+                    dash.startPairingAssistant()
+                    dash.openWirelessDebuggingSettings()
+                    step = 2
+                },
                 secondary = "Back" to { step = 0 },
             )
             2 -> Page(
                 hero = { ScreenshotHero(Res.drawable.dash_step_dialog) },
                 title = "Pair with the code",
-                subtitle = "Tap \"Pair device with pairing code\" and keep that dialog open. Enter its " +
-                    "port and 6-digit code below.",
+                subtitle = "In Wireless debugging, tap \"Pair device with pairing code\" and keep that " +
+                    "dialog open. Pull down notifications, tap Pillion's \"Enter code\", and type only " +
+                    "the 6-digit code. If Pillion asks for the port too, type both like \"35465 854874\".",
                 step = 2,
                 primary = (if (state.stage == DashStage.Connected) "Next" else "Pair") to {
                     if (state.stage == DashStage.Connected) step = 3
-                    else dash.pair("127.0.0.1", port.trim().toIntOrNull() ?: 0, code.trim())
+                    else dash.pair(code.trim())
                 },
-                secondary = "Back" to { step = 1 },
+                secondary = "Open settings again" to {
+                    dash.startPairingAssistant()
+                    dash.openWirelessDebuggingSettings()
+                },
             ) {
                 Spacer(Modifier.height(20.dp))
                 OutlinedTextField(
-                    port, { port = it }, label = { Text("Pairing port") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    code, { code = it }, label = { Text("6-digit code") }, singleLine = true,
+                    code, { code = it }, label = { Text("Code, or port and code") }, singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth(),
                 )

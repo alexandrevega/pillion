@@ -11,4 +11,8 @@ interface SettingsStore {
     /** Whether the user has opted into "dedicated dash display" mode (completed onboarding). */
     fun dashEnabled(): Boolean
     fun setDashEnabled(enabled: Boolean)
+
+    /** Virtual display resolution for the dedicated dash helper. */
+    fun dashResolution(): DashResolution
+    fun setDashResolution(resolution: DashResolution)
 }

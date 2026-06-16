@@ -29,6 +29,15 @@ data class DashState(val stage: DashStage = DashStage.Idle, val message: String?
 interface DashSetup {
     val state: StateFlow<DashState>
 
+    /** Start pairing service discovery and show the notification used to enter the pairing code. */
+    fun startPairingAssistant()
+
+    /** Open Android's Developer options screen so the user can enable Wireless debugging. */
+    fun openWirelessDebuggingSettings()
+
+    /** Pair using auto-discovered port, or parse a fallback "port code" submission. */
+    fun pair(code: String)
+
     /** Pair once using the code + port from Wireless debugging → "Pair device with pairing code". */
     fun pair(host: String, pairingPort: Int, code: String)
 

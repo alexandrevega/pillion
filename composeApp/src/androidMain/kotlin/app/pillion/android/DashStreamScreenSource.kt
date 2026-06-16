@@ -22,6 +22,7 @@ class DashStreamScreenSource : ScreenSource {
     @Volatile private var running = false
     @Volatile private var socket: Socket? = null
     @Volatile private var latest: ByteArray? = null
+    @Volatile private var desiredComponent: String? = null
 
     override fun start() {
         if (running) return
@@ -38,6 +39,7 @@ class DashStreamScreenSource : ScreenSource {
                 }
                 socket = s
                 Log.d(TAG, "dash stream: connected to 127.0.0.1:${DashServer.PORT}")
+                syncDesiredState(s)
                 val data = DataInputStream(s.getInputStream().buffered())
                 while (running) {
                     val len = data.readInt()
@@ -59,15 +61,46 @@ class DashStreamScreenSource : ScreenSource {
     override fun latestFrame(): ByteArray? = latest
 
     /** Tell the helper to move the foreground app onto the dash display and start encoding. */
-    fun promote(component: String) = send("PROMOTE $component\n")
+    fun promote(component: String) {
+        desiredComponent = component
+        send("PROMOTE $component\n")
+    }
 
     /** Tell the helper to move the app back to the phone and stop encoding. */
-    fun demote() = send("DEMOTE\n")
+    fun demote() {
+        desiredComponent = null
+        latest = null
+        send("DEMOTE\n")
+    }
 
     private fun send(line: String) {
-        val s = socket ?: return
+        val s = socket ?: run {
+            Log.d(TAG, "dash stream: queued ${line.trim()} until helper connects")
+            return
+        }
+        send(s, line)
+    }
+
+    private fun syncDesiredState(s: Socket) {
+        val component = desiredComponent
+        if (component == null) {
+            send(s, "DEMOTE\n")
+        } else {
+            Log.d(TAG, "dash stream: syncing pending PROMOTE $component")
+            send(s, "PROMOTE $component\n")
+        }
+    }
+
+    private fun send(s: Socket, line: String) {
         synchronized(writeLock) {
             runCatching { s.getOutputStream().apply { write(line.toByteArray()); flush() } }
+                .onFailure {
+                    // The phone can silently tear down this loopback socket on screen-off, so a write
+                    // at lock time (PROMOTE) fails. Close it to wake the read loop, which reconnects
+                    // and replays desiredComponent via syncDesiredState — self-healing the command.
+                    Log.d(TAG, "dash stream: send failed for ${line.trim()}: ${it.javaClass.simpleName}; reconnecting")
+                    runCatching { s.close() }
+                }
         }
     }
 
@@ -76,6 +109,7 @@ class DashStreamScreenSource : ScreenSource {
     override fun stop() {
         running = false
         runCatching { socket?.close() }
+        desiredComponent = null
         latest = null
     }
 

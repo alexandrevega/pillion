@@ -11,6 +11,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.LocalUriHandler
 import app.pillion.core.AppInfo
 import app.pillion.core.DashSetup
+import app.pillion.core.DashResolution
 import app.pillion.core.MirrorController
 import app.pillion.core.MirrorSettings
 import app.pillion.core.SettingsStore
@@ -41,6 +42,7 @@ fun App(
         var showSettings by rememberSaveable { mutableStateOf(false) }
         var showDashOnboarding by rememberSaveable { mutableStateOf(false) }
         var dashEnabled by remember { mutableStateOf(settingsStore?.dashEnabled() ?: false) }
+        var dashResolution by remember { mutableStateOf(settingsStore?.dashResolution() ?: DashResolution.DEFAULT) }
         var showDisclaimer by rememberSaveable { mutableStateOf(true) }
         var update by remember { mutableStateOf<UpdateInfo?>(null) }
         var updateDismissed by rememberSaveable { mutableStateOf(false) }
@@ -72,6 +74,11 @@ fun App(
                 onThemeMode = { themeMode = it; settingsStore?.setThemeMode(it) },
                 dashSupported = dashSetup != null,
                 dashEnabled = dashEnabled,
+                dashResolution = dashResolution,
+                onDashResolution = {
+                    dashResolution = it
+                    settingsStore?.setDashResolution(it)
+                },
                 onSetUpDash = { showDashOnboarding = true },
                 onDisableDash = { dashEnabled = false; settingsStore?.setDashEnabled(false) },
                 update = update,
@@ -82,7 +89,7 @@ fun App(
                 state = state,
                 update = update,
                 onOpenSettings = { showSettings = true },
-                onStart = { controller.start(MirrorSettings(quality, maxFps)) },
+                onStart = { controller.start(MirrorSettings(quality, maxFps, dashResolution)) },
                 onStop = controller::stop,
             )
         }

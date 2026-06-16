@@ -40,7 +40,8 @@ import java.net.Socket
  * Status/diagnostics go to **logcat** (tag [TAG]).
  *
  * Launch detached so it outlives the spawning ADB connection:
- *   CLASSPATH=<base.apk> nohup app_process / app.pillion.server.DashServer <w> <h> <dpi> <quality> <component> &
+ *   CLASSPATH=<base.apk> nohup app_process / app.pillion.server.DashServer \
+ *     <virtual-w> <virtual-h> <dpi> <quality> <output-w> <output-h> <component> &
  */
 object DashServer {
 
@@ -64,8 +65,10 @@ object DashServer {
 
     private const val MIN_INTERVAL_MS = 50L // cap capture/encode to ~20fps; the app paces sends
 
-    private var width = 480
-    private var height = 240
+    private var virtualWidth = 480
+    private var virtualHeight = 240
+    private var outputWidth = 480
+    private var outputHeight = 240
     private var quality = 40
     private var lastEncodeMs = 0L
 
@@ -81,23 +84,38 @@ object DashServer {
     fun main(args: Array<String>) {
         if (Looper.myLooper() == null) Looper.prepareMainLooper()
 
-        width = args.getOrNull(0)?.toIntOrNull() ?: 480
-        height = args.getOrNull(1)?.toIntOrNull() ?: 240
+        virtualWidth = args.getOrNull(0)?.toIntOrNull() ?: 480
+        virtualHeight = args.getOrNull(1)?.toIntOrNull() ?: 240
         val dpi = args.getOrNull(2)?.toIntOrNull() ?: 160
         quality = args.getOrNull(3)?.toIntOrNull() ?: 40
-        val launchComponent = args.getOrNull(4) // e.g. com.waze/com.waze.FreeMapAppActivity
+        val outputArg = args.getOrNull(4)?.toIntOrNull()
+        outputWidth = outputArg ?: 480
+        outputHeight = args.getOrNull(5)?.toIntOrNull()?.takeIf { outputArg != null } ?: 240
+        val launchComponent = args.getOrNull(if (outputArg == null) 4 else 6)
+        // launchComponent example: com.waze/com.waze.FreeMapAppActivity
 
         try {
             val context = ShellContext(systemContext())
             val captureThread = HandlerThread("pillion-capture").apply { start() }
             val handler = Handler(captureThread.looper)
 
-            val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+            val reader = ImageReader.newInstance(virtualWidth, virtualHeight, PixelFormat.RGBA_8888, 2)
             reader.setOnImageAvailableListener({ ir -> onImage(ir) }, handler)
 
-            val display = createTrustedVirtualDisplay(context, "pillion-dash", width, height, dpi, reader.surface)
+            val display = createTrustedVirtualDisplay(
+                context,
+                "pillion-dash",
+                virtualWidth,
+                virtualHeight,
+                dpi,
+                reader.surface,
+            )
             displayId = display.display.displayId
-            Log.i(TAG, "trusted display created id=$displayId")
+            Log.i(
+                TAG,
+                "trusted display created id=$displayId virtual=${virtualWidth}x$virtualHeight " +
+                    "output=${outputWidth}x$outputHeight dpi=$dpi",
+            )
 
             // The display starts empty (idle, no encoding). The app sends PROMOTE on screen-off and
             // DEMOTE on unlock over the socket. An optional arg promotes immediately (dev/testing).
@@ -131,13 +149,21 @@ object DashServer {
         }
     }
 
+    // Held in a field so the listening socket is never GC-finalized while the helper lives.
+    @Volatile private var serverSocket: ServerSocket? = null
+
     /** Serve `[4-byte length][JPEG]` frames over loopback TCP — works with no network (no Wi-Fi). */
     private fun startTcpServer() {
-        val server = ServerSocket(PORT, 1, InetAddress.getByName("127.0.0.1"))
+        val server = ServerSocket(PORT, 4, InetAddress.getByName("127.0.0.1"))
+        serverSocket = server
         Thread {
+            // Keep accepting forever, one thread per client. The phone (esp. MIUI) can tear down the
+            // app's loopback socket on screen-off; the app then reconnects, so we must stay ready to
+            // accept the new connection rather than blocking inside a single client's serve loop.
             while (true) {
-                val client = runCatching { server.accept() }.getOrNull() ?: break
-                serveClient(client)
+                val client = runCatching { server.accept() }.getOrNull()
+                if (client == null) { Thread.sleep(50); continue }
+                Thread { serveClient(client) }.apply { isDaemon = true; start() }
             }
         }.apply { isDaemon = false; start() }
     }
@@ -149,7 +175,7 @@ object DashServer {
             client.tcpNoDelay = true
             val out = DataOutputStream(BufferedOutputStream(client.getOutputStream()))
             var sentSeq = -1L
-            while (true) {
+            while (!client.isClosed) {
                 val seq = latestSeq
                 val frame = latestJpeg
                 if (frame != null && seq != sentSeq) {
@@ -179,7 +205,11 @@ object DashServer {
                 }
             }
         } catch (_: Throwable) {
-            // socket closed; the writer loop handles teardown
+            // fall through to close
+        } finally {
+            // Closing wakes the writer loop (it checks isClosed) so a broken client's thread ends
+            // instead of sleeping forever.
+            runCatching { client.close() }
         }
     }
 
@@ -211,14 +241,28 @@ object DashServer {
     private fun toJpeg(image: Image): ByteArray {
         val plane = image.planes[0]
         val pixelStride = plane.pixelStride
-        val rowPadding = plane.rowStride - pixelStride * width
+        val rowPadding = plane.rowStride - pixelStride * virtualWidth
         val padded = Bitmap.createBitmap(
-            width + if (pixelStride > 0) rowPadding / pixelStride else 0, height, Bitmap.Config.ARGB_8888,
+            virtualWidth + if (pixelStride > 0) rowPadding / pixelStride else 0,
+            virtualHeight,
+            Bitmap.Config.ARGB_8888,
         )
         padded.copyPixelsFromBuffer(plane.buffer)
-        val bitmap = if (rowPadding == 0) padded else Bitmap.createBitmap(padded, 0, 0, width, height)
+        val bitmap = if (rowPadding == 0) {
+            padded
+        } else {
+            Bitmap.createBitmap(padded, 0, 0, virtualWidth, virtualHeight)
+        }
+        val output = if (bitmap.width == outputWidth && bitmap.height == outputHeight) {
+            bitmap
+        } else {
+            Bitmap.createScaledBitmap(bitmap, outputWidth, outputHeight, true)
+        }
         val out = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        output.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        if (output !== bitmap) output.recycle()
+        if (bitmap !== padded) bitmap.recycle()
+        padded.recycle()
         return out.toByteArray()
     }
 

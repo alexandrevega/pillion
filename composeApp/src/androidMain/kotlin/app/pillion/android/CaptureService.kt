@@ -15,6 +15,8 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
+import app.pillion.core.DashResolution
 import app.pillion.core.MirrorEngine
 import app.pillion.core.ScreenSource
 import app.pillion.core.MirrorState
@@ -40,6 +42,9 @@ class CaptureService : Service() {
     private var dashEnabled = false
     private var dashSwitch: SwitchableScreenSource? = null
     private var screenReceiver: BroadcastReceiver? = null
+    // The helper can't be detached on this device's adbd (it kills the whole session tree on
+    // disconnect, defeating nohup/setsid), so we hold its exec stream open for the session.
+    @Volatile private var dashHelperStream: io.github.muntashirakon.adb.AdbStream? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -51,8 +56,9 @@ class CaptureService : Service() {
 
         val quality = intent?.getIntExtra(EXTRA_QUALITY, 40) ?: 40
         val maxFps = intent?.getIntExtra(EXTRA_MAX_FPS, 15) ?: 15
+        val dashResolution = dashResolutionFrom(intent)
         dashEnabled = intent?.getBooleanExtra(EXTRA_DASH_ENABLED, false) ?: false
-        startSession(quality, maxFps)
+        startSession(quality, maxFps, dashResolution)
         return START_NOT_STICKY
     }
 
@@ -62,7 +68,7 @@ class CaptureService : Service() {
      * (foreground app on a trusted display) whenever the phone is locked — **mirror while unlocked,
      * dash while locked**. The helper only encodes while locked, so it costs no extra battery idle.
      */
-    private fun startSession(quality: Int, maxFps: Int) {
+    private fun startSession(quality: Int, maxFps: Int, dashResolution: DashResolution) {
         // Must be foreground (mediaProjection) before acquiring the projection (Android 10+).
         startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         val data = resultData
@@ -81,7 +87,10 @@ class CaptureService : Service() {
             val switch = SwitchableScreenSource(mirror, DashStreamScreenSource())
             dashSwitch = switch
             // Spawn the helper once (needs the ADB connection); it serves over loopback afterwards.
-            scope.launch(Dispatchers.IO) { runCatching { spawnHelper(quality) } }
+            scope.launch(Dispatchers.IO) {
+                runCatching { spawnHelper(quality, dashResolution) }
+                    .onFailure { Log.e(TAG, "dash: helper spawn failed", it) }
+            }
             registerScreenReceiver()
             switch
         } else {
@@ -95,8 +104,19 @@ class CaptureService : Service() {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context, intent: Intent) {
                 when (intent.action) {
-                    Intent.ACTION_SCREEN_OFF -> dashSwitch?.let { s -> foregroundComponent()?.let(s::promote) }
-                    Intent.ACTION_USER_PRESENT -> dashSwitch?.demote()
+                    Intent.ACTION_SCREEN_OFF -> {
+                        val component = foregroundComponent()
+                        Log.d(TAG, "dash: screen off; foreground=$component")
+                        if (component == null) {
+                            Log.w(TAG, "dash: no foreground app; usage access may be missing")
+                        } else {
+                            dashSwitch?.promote(component)
+                        }
+                    }
+                    Intent.ACTION_USER_PRESENT -> {
+                        Log.d(TAG, "dash: user present; demoting")
+                        dashSwitch?.demote()
+                    }
                 }
             }
         }
@@ -117,17 +137,28 @@ class CaptureService : Service() {
     private fun foregroundComponent(): String? {
         val usm = getSystemService(UsageStatsManager::class.java) ?: return null
         val now = System.currentTimeMillis()
-        val events = runCatching { usm.queryEvents(now - 60_000, now) }.getOrNull() ?: return null
+        val events = runCatching { usm.queryEvents(now - 60_000, now) }
+            .onFailure { Log.w(TAG, "dash: usage query failed", it) }
+            .getOrNull() ?: return null
         val event = UsageEvents.Event()
-        var pkg: String? = null
+        var component: String? = null
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
             @Suppress("DEPRECATION")
             if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND && event.packageName != packageName) {
-                pkg = event.packageName
+                val candidate = packageManager.getLaunchIntentForPackage(event.packageName)
+                    ?.component
+                    ?.flattenToString()
+                if (candidate == null) {
+                    Log.d(TAG, "dash: ignoring foreground package without launcher: ${event.packageName}")
+                } else {
+                    component = candidate
+                    Log.d(TAG, "dash: foreground candidate=$component")
+                }
             }
         }
-        return pkg?.let { packageManager.getLaunchIntentForPackage(it)?.component?.flattenToString() }
+        if (component == null) Log.w(TAG, "dash: UsageStats returned no launchable foreground app")
+        return component
     }
 
     private fun runEngine(screen: ScreenSource, maxFps: Int) {
@@ -146,13 +177,45 @@ class CaptureService : Service() {
         mirror.start(scope)
     }
 
-    private fun spawnHelper(quality: Int) {
+    private fun spawnHelper(quality: Int, dashResolution: DashResolution) {
         // No app argument: the helper creates the trusted display idle and waits for PROMOTE on lock.
+        // Keep dpi at 160 so larger presets expose more dp to nav apps, then scale to the TFT.
+        val adb = PillionAdb.getInstance(this)
+        val connected = runCatching { adb.autoConnectDevice(this, timeoutMs = 15_000) }
+            .onSuccess { Log.d(TAG, "dash: adb auto-connect=$it") }
+            .onFailure { Log.w(TAG, "dash: adb auto-connect failed", it) }
+            .getOrDefault(false)
+        check(connected) { "Wireless debugging is not connected" }
+        runCatching { adb.prepareDashPrivileges(this) }
+            .onSuccess { Log.d(TAG, "dash: granted usage-stats appop through shell") }
+            .onFailure { Log.w(TAG, "dash: could not grant usage-stats appop", it) }
+        Log.d(TAG, "dash: spawning helper virtual=${dashResolution.width}x${dashResolution.height}")
+        // Run the helper in the FOREGROUND of this exec stream (no nohup/&): this device's adbd
+        // kills the whole session process tree when the spawning stream closes — proven on-device,
+        // even setsid can't escape it — so a detached helper dies instantly and the trusted display
+        // is released. Holding the stream open keeps the helper (and the display) alive for the
+        // whole session; onDestroy closes it to tear the helper down.
         val cmd = "CLASSPATH=\$(pm path $packageName | grep base.apk | cut -d: -f2) " +
-            "nohup app_process / app.pillion.server.DashServer 480 240 160 $quality >/dev/null 2>&1 &"
-        val stream = PillionAdb.getInstance(this).openExecStream(cmd)
-        stream.openInputStream().readBytes() // returns once the helper has backgrounded
-        runCatching { stream.close() }
+            "exec app_process / app.pillion.server.DashServer " +
+            "${dashResolution.width} ${dashResolution.height} 160 $quality 480 240"
+        val stream = adb.openExecStream(cmd)
+        dashHelperStream = stream
+        // The helper logs to logcat, not stdout, so this blocks until the helper exits or we close
+        // the stream in onDestroy. Draining keeps the exec pipe (and thus the helper) open.
+        runCatching { stream.openInputStream().readBytes() }
+            .onFailure { t ->
+                if (t.message?.contains("Stream closed", ignoreCase = true) != true) throw t
+            }
+        Log.d(TAG, "dash: helper stream ended")
+    }
+
+    private fun dashResolutionFrom(intent: Intent?): DashResolution {
+        val width = intent?.getIntExtra(EXTRA_DASH_WIDTH, DashResolution.DEFAULT.width)
+            ?: DashResolution.DEFAULT.width
+        val height = intent?.getIntExtra(EXTRA_DASH_HEIGHT, DashResolution.DEFAULT.height)
+            ?: DashResolution.DEFAULT.height
+        return DashResolution.values().firstOrNull { it.width == width && it.height == height }
+            ?: DashResolution.DEFAULT
     }
 
     private fun killHelper() {
@@ -167,8 +230,13 @@ class CaptureService : Service() {
     override fun onDestroy() {
         engine?.stop()
         screenReceiver?.let { runCatching { unregisterReceiver(it) } }
-        // Detached thread: it must outlive scope.cancel() to tell the helper to release the display.
-        if (dashEnabled) Thread { killHelper() }.start()
+        // Closing the exec stream ends the helper's adb session, which releases the trusted display;
+        // pkill is a belt-and-suspenders backup. Detached thread: must outlive scope.cancel().
+        if (dashEnabled) Thread {
+            runCatching { dashHelperStream?.close() }
+            dashHelperStream = null
+            killHelper()
+        }.start()
         scope.cancel()
         releaseWakeLock()
         _state.value = MirrorState.Idle
@@ -231,12 +299,15 @@ class CaptureService : Service() {
     companion object {
         private const val NOTIF_ID = 1
         private const val CHANNEL_ID = "pillion"
+        private const val TAG = "Pillion"
         private const val MAX_SESSION_MS = 3L * 60 * 60 * 1000 // 3h safety cap
         const val ACTION_STOP = "app.pillion.action.STOP"
         const val EXTRA_QUALITY = "quality"
         const val EXTRA_MAX_FPS = "maxFps"
         /** When true, the session switches to the dedicated dash display whenever the phone is locked. */
         const val EXTRA_DASH_ENABLED = "dashEnabled"
+        const val EXTRA_DASH_WIDTH = "dashWidth"
+        const val EXTRA_DASH_HEIGHT = "dashHeight"
 
         // Handed over by the Activity after the user grants screen capture.
         @Volatile var resultCode: Int = 0

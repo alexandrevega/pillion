@@ -5,6 +5,7 @@ import android.os.Build
 import io.github.muntashirakon.adb.AbsAdbConnectionManager
 import io.github.muntashirakon.adb.AdbStream
 import java.io.File
+import java.io.IOException
 import java.math.BigInteger
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
@@ -64,10 +65,27 @@ class PillionAdb private constructor(
     fun runShell(command: String): String {
         val stream: AdbStream = openStream("shell:$command")
         try {
-            return stream.openInputStream().bufferedReader().readText()
+            val reader = stream.openInputStream().bufferedReader()
+            val output = StringBuilder()
+            val buffer = CharArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = try {
+                    reader.read(buffer)
+                } catch (e: IOException) {
+                    if (e.message?.contains("Stream closed", ignoreCase = true) == true) break else throw e
+                }
+                if (read < 0) break
+                output.append(buffer, 0, read)
+            }
+            return output.toString()
         } finally {
             stream.close()
         }
+    }
+
+    /** Grant shell-backed special access needed by dedicated dash mode. */
+    fun prepareDashPrivileges(context: Context) {
+        runShell("cmd appops set ${context.packageName} GET_USAGE_STATS allow")
     }
 
     /**

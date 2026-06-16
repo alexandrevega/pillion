@@ -1,8 +1,13 @@
 package app.pillion.android
 
+import android.Manifest
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Column
@@ -20,6 +25,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +51,11 @@ import kotlinx.coroutines.withContext
 class AdbBootstrapActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 100)
+        }
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) { BootstrapScreen() }
@@ -55,6 +66,7 @@ class AdbBootstrapActivity : ComponentActivity() {
     @Composable
     private fun BootstrapScreen() {
         val scope = rememberCoroutineScope()
+        val pairing by AdbPairingCoordinator.state.collectAsState()
         var host by remember { mutableStateOf("127.0.0.1") }
         var pairPort by remember { mutableStateOf("") }
         var code by remember { mutableStateOf("") }
@@ -68,6 +80,31 @@ class AdbBootstrapActivity : ComponentActivity() {
         ) {
             Text("Dash ADB bootstrap (dev)", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(12.dp))
+
+            Text(
+                "No-split test: start the assistant, enable Wireless debugging, open the pairing-code " +
+                    "dialog, then enter the code from Pillion's notification.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                "Status: ${pairing.message ?: pairing.stage.name}" +
+                    (pairing.endpoint?.let { " (${it.host}:${it.port})" } ?: ""),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Button(
+                onClick = {
+                    AdbPairingCoordinator.start(applicationContext)
+                    startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("0. Start no-split pairing assistant") }
+            Button(
+                onClick = { AdbPairingCoordinator.pairWithDiscoveredEndpoint(applicationContext, code) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Pair using discovered port + typed code") }
+
+            Spacer(Modifier.height(12.dp))
+            Text("Manual fallback", style = MaterialTheme.typography.titleMedium)
             OutlinedTextField(host, { host = it }, label = { Text("Host (IP from Wireless debugging)") }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(
                 pairPort, { pairPort = it }, label = { Text("Pairing port") },
@@ -141,7 +178,8 @@ class AdbBootstrapActivity : ComponentActivity() {
                                 // nohup + & : the helper outlives this ADB stream, so it keeps serving
                                 // frames after Wi-Fi drops on the bike.
                                 val cmd = "CLASSPATH=\$(pm path app.pillion | grep base.apk | cut -d: -f2) " +
-                                    "nohup app_process / app.pillion.server.DashServer 480 240 160 40 $component >/dev/null 2>&1 &"
+                                    "nohup app_process / app.pillion.server.DashServer " +
+                                    "960 480 160 40 480 240 $component >/dev/null 2>&1 &"
                                 val stream = PillionAdb.getInstance(applicationContext).openExecStream(cmd)
                                 stream.openInputStream().readBytes() // returns once backgrounded
                                 stream.close()
