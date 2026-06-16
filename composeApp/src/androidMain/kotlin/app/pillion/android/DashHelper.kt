@@ -1,6 +1,7 @@
 package app.pillion.android
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import app.pillion.core.DashResolution
 import app.pillion.server.DashServer
@@ -23,6 +24,11 @@ object DashHelper {
     private const val WATCHDOG_INTERVAL_MS = 3_000L
     private const val LOOPBACK_CONNECT_TRIES = 10
     private const val LOOPBACK_RETRY_MS = 300L
+    // A freshly-spawned helper takes ~1-2s to create the display + bind its socket; don't respawn
+    // (which pkills it) until it's had time to come up, or the watchdog thrashes in a respawn loop.
+    private const val SPAWN_GRACE_MS = 8_000L
+
+    @Volatile private var lastSpawnAt = 0L
 
     @Synchronized
     fun ensureRunning(
@@ -96,8 +102,10 @@ object DashHelper {
      * drops, killing the helper via adbd's cgroup. Recovery uses the loopback channel, so it works
      * offline as long as [PillionAdb.enableTcpip] succeeded earlier.
      */
+    @Synchronized
     fun startWatchdog(context: Context, quality: Int, dashResolution: DashResolution) {
-        if (watchdog != null) return
+        if (watchdog?.isAlive == true) return // exactly one watchdog, even across session restarts
+        watchdog = null
         val appContext = context.applicationContext
         watchdog = Thread {
             while (!Thread.currentThread().isInterrupted) {
@@ -107,6 +115,8 @@ object DashHelper {
                     break
                 }
                 if (isRunning()) continue
+                // A helper we just spawned is still coming up; don't pkill+respawn it mid-startup.
+                if (SystemClock.elapsedRealtime() - lastSpawnAt < SPAWN_GRACE_MS) continue
                 Log.w(TAG, "dash: helper down — attempting respawn over loopback")
                 runCatching { ensureRunning(appContext, quality, dashResolution) }
                     .onSuccess { Log.i(TAG, "dash: helper respawned") }
@@ -151,6 +161,7 @@ object DashHelper {
                 if (t.message?.contains("Stream closed", ignoreCase = true) != true) throw t
             }
         runCatching { stream.close() }
+        lastSpawnAt = SystemClock.elapsedRealtime()
         Log.d(TAG, "dash: helper spawned (detached to init)")
     }
 
