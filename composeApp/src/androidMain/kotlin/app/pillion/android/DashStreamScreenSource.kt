@@ -1,5 +1,6 @@
 package app.pillion.android
 
+import android.os.SystemClock
 import android.util.Log
 import app.pillion.core.ScreenSource
 import app.pillion.server.DashServer
@@ -22,6 +23,8 @@ class DashStreamScreenSource : ScreenSource {
     @Volatile private var running = false
     @Volatile private var socket: Socket? = null
     @Volatile private var latest: ByteArray? = null
+    @Volatile private var lastFrameAt: Long = 0
+    @Volatile private var staleLogged = false
     @Volatile private var desiredComponent: String? = null
 
     override fun start() {
@@ -47,6 +50,7 @@ class DashStreamScreenSource : ScreenSource {
                     val frame = ByteArray(len)
                     data.readFully(frame)
                     latest = frame
+                    lastFrameAt = SystemClock.elapsedRealtime()
                 }
             } catch (t: Throwable) {
                 if (running) Log.d(TAG, "dash stream: ${t.message}, retrying")
@@ -58,7 +62,25 @@ class DashStreamScreenSource : ScreenSource {
         }
     }
 
-    override fun latestFrame(): ByteArray? = latest
+    /**
+     * The most recent frame — but only if it's *fresh*. If the helper stalls or dies (e.g. wifi /
+     * wireless-debugging drops and it stops producing frames), no new frame arrives over loopback, so
+     * we stop handing the engine the same stale frame. That ends the misleading "still sending Nfps"
+     * while the dash is actually frozen, and the log tells us whether the helper is gone or just stuck.
+     */
+    override fun latestFrame(): ByteArray? {
+        val frame = latest ?: return null
+        val age = SystemClock.elapsedRealtime() - lastFrameAt
+        if (age > STALE_MS) {
+            if (!staleLogged) {
+                Log.w(TAG, "dash stream: no new frame for ${age}ms — helper stalled or gone; pausing send (socket=${if (socket != null) "connected" else "down"})")
+                staleLogged = true
+            }
+            return null
+        }
+        staleLogged = false
+        return frame
+    }
 
     /** Tell the helper to move the foreground app onto the dash display and start encoding. */
     fun promote(component: String) {
@@ -128,5 +150,8 @@ class DashStreamScreenSource : ScreenSource {
         const val MAX_FRAME = 4 * 1024 * 1024
         const val CONNECT_TIMEOUT_MS = 2000
         const val RETRY_MS = 300L
+
+        /** A frame older than this means the helper stopped producing — pause sending stale frames. */
+        const val STALE_MS = 1000L
     }
 }
