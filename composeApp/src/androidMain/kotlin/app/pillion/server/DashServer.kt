@@ -202,6 +202,7 @@ object DashServer {
                 when {
                     line.startsWith("PROMOTE ") -> promoteApp(line.removePrefix("PROMOTE ").trim())
                     line == "DEMOTE" -> demoteApp()
+                    line == "QUIT" -> shutdown()
                 }
             }
         } catch (_: Throwable) {
@@ -223,6 +224,15 @@ object DashServer {
         lastComponent = component
         capturing = true
         Log.i(TAG, "promoted $component to display $displayId")
+    }
+
+    /** Release the trusted display and exit. Process death drops the display token, so System.exit
+     *  is enough; the app sends QUIT over loopback when the session ends (the helper is detached and
+     *  would otherwise outlive the app). */
+    private fun shutdown() {
+        Log.i(TAG, "shutdown requested; releasing display and exiting")
+        runCatching { demoteApp() }
+        System.exit(0)
     }
 
     /** Move the app back to the phone and stop encoding (phone unlocked). */

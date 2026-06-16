@@ -41,4 +41,10 @@ class SwitchableScreenSource(
         useDash = false
         dash.demote()
     }
+
+    /** End the session: stop mirroring and tell the (detached) helper to release the display + exit. */
+    fun quit() {
+        runCatching { mirror.stop() }
+        runCatching { dash.quit() }
+    }
 }

@@ -42,9 +42,6 @@ class CaptureService : Service() {
     private var dashEnabled = false
     private var dashSwitch: SwitchableScreenSource? = null
     private var screenReceiver: BroadcastReceiver? = null
-    // The helper can't be detached on this device's adbd (it kills the whole session tree on
-    // disconnect, defeating nohup/setsid), so we hold its exec stream open for the session.
-    @Volatile private var dashHelperStream: io.github.muntashirakon.adb.AdbStream? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -189,24 +186,29 @@ class CaptureService : Service() {
         runCatching { adb.prepareDashPrivileges(this) }
             .onSuccess { Log.d(TAG, "dash: granted usage-stats appop through shell") }
             .onFailure { Log.w(TAG, "dash: could not grant usage-stats appop", it) }
+        // Clear any stale helper from a previous session while ADB is available.
+        runCatching { adb.runShell("pkill -f app.pillion.server.DashServer") }
         Log.d(TAG, "dash: spawning helper virtual=${dashResolution.width}x${dashResolution.height}")
-        // Run the helper in the FOREGROUND of this exec stream (no nohup/&): this device's adbd
-        // kills the whole session process tree when the spawning stream closes — proven on-device,
-        // even setsid can't escape it — so a detached helper dies instantly and the trusted display
-        // is released. Holding the stream open keeps the helper (and the display) alive for the
-        // whole session; onDestroy closes it to tear the helper down.
-        val cmd = "CLASSPATH=\$(pm path $packageName | grep base.apk | cut -d: -f2) " +
-            "exec app_process / app.pillion.server.DashServer " +
-            "${dashResolution.width} ${dashResolution.height} 160 $quality 480 240"
-        val stream = adb.openExecStream(cmd)
-        dashHelperStream = stream
-        // The helper logs to logcat, not stdout, so this blocks until the helper exits or we close
-        // the stream in onDestroy. Draining keeps the exec pipe (and thus the helper) open.
+        // Orphan the helper to init (pid 1) — the same trick Shizuku's native starter uses: a wrapping
+        // shell backgrounds app_process and then exits, so the helper reparents to init. adbd only
+        // reaps its own *direct* children, so once orphaned the helper survives ADB disconnect AND
+        // wifi loss (verified on Pixel 9a / GrapheneOS). After spawn the helper serves frames over
+        // loopback (127.0.0.1:28115) and the app drives PROMOTE/DEMOTE/QUIT over that same socket, so
+        // no network is needed for the rest of the session — this is what makes the no-wifi ride work.
+        // (A plain `exec app_process &` leaves it a direct child of adbd, which adbd then kills.)
+        val inner = "CLASSPATH=\$(pm path $packageName | grep base.apk | cut -d: -f2) " +
+            "app_process / app.pillion.server.DashServer " +
+            "${dashResolution.width} ${dashResolution.height} 160 $quality 480 240 " +
+            "</dev/null >/dev/null 2>&1 &"
+        val stream = adb.openShellStream("sh -c '$inner'")
+        // The wrapper shell exits as soon as it backgrounds the helper, so this returns quickly; the
+        // helper is already detached by then. Fire-and-forget — we don't hold the stream open.
         runCatching { stream.openInputStream().readBytes() }
             .onFailure { t ->
                 if (t.message?.contains("Stream closed", ignoreCase = true) != true) throw t
             }
-        Log.d(TAG, "dash: helper stream ended")
+        runCatching { stream.close() }
+        Log.d(TAG, "dash: helper spawned (detached to init)")
     }
 
     private fun dashResolutionFrom(intent: Intent?): DashResolution {
@@ -230,11 +232,12 @@ class CaptureService : Service() {
     override fun onDestroy() {
         engine?.stop()
         screenReceiver?.let { runCatching { unregisterReceiver(it) } }
-        // Closing the exec stream ends the helper's adb session, which releases the trusted display;
-        // pkill is a belt-and-suspenders backup. Detached thread: must outlive scope.cancel().
+        // The helper is detached (orphaned to init), so it won't die on its own. Tell it to QUIT over
+        // loopback — works with no network — to release the trusted display; pkill over ADB is a
+        // best-effort backup (only reachable while wifi is up). Detached thread: must outlive cancel().
+        val switch = dashSwitch
         if (dashEnabled) Thread {
-            runCatching { dashHelperStream?.close() }
-            dashHelperStream = null
+            runCatching { switch?.quit() }
             killHelper()
         }.start()
         scope.cancel()

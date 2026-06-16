@@ -73,6 +73,16 @@ class DashStreamScreenSource : ScreenSource {
         send("DEMOTE\n")
     }
 
+    /**
+     * End the session: tell the helper to release the trusted display and exit, then stop reading.
+     * Sent over the loopback socket, so it works with no network — the detached helper can be torn
+     * down even after wifi is gone (otherwise it would outlive the app).
+     */
+    fun quit() {
+        send("QUIT\n")
+        stop()
+    }
+
     private fun send(line: String) {
         val s = socket ?: run {
             Log.d(TAG, "dash stream: queued ${line.trim()} until helper connects")
