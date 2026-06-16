@@ -46,6 +46,31 @@ CRC follows the header, then the payload.
 
 Reference implementation: [`Crc32Mpeg2.kt`](../composeApp/src/commonMain/kotlin/app/pillion/protocol/Crc32Mpeg2.kt).
 
+## Native Unpack Status Codes
+
+StreetCross exposes these status codes through `NaviLiteUnpackedMessageStatus`. The native unpacker returns them before higher-level Java dispatch touches the message.
+
+| Status                                           | ID | Meaning                                                                                                              |
+|--------------------------------------------------|---:|----------------------------------------------------------------------------------------------------------------------|
+| `STATUS_OK`                                      | 0  | Header, checksum, frame/service relation, payload data type, payload length, and payload content were accepted.      |
+| `STATUS_ERROR_SIZE_LESS_THAN_HEADER`             | 1  | Fewer than 12 header bytes were available.                                                                           |
+| `STATUS_ERROR_MAGIC_CODE_FAIL`                   | 2  | The `nAl@` magic did not match.                                                                                      |
+| `STATUS_ERROR_PAYLOAD_LEGNTH_NOT_MATCH`          | 3  | Header payload length and available bytes did not match. StreetCross keeps the misspelling in the Java constant.     |
+| `STATUS_ERROR_SERVICE_TYPE_NOT_MATCH_FRAME_TYPE` | 4  | Service id is not valid for the supplied frame type.                                                                 |
+| `STATUS_ERROR_SERVICE_TYPE_NOT_MATCH_PAYLOAD`    | 5  | Service id is known, but the payload data type or declared payload length does not match the native unpacker branch. |
+| `STATUS_ERROR_PAYLOAD_CONTENT_ERROR`             | 6  | Payload shape passed coarse checks, but required content was missing or invalid.                                     |
+| `STATUS_ERROR_CHECKSUM_FAIL`                     | 7  | CRC-32/MPEG-2 did not match the listed checksum.                                                                     |
+
+## Receiver Classification Guidance
+
+A receiver should distinguish four different non-success states before handing a frame to application logic:
+
+| Classification                  | Meaning | Recommended behavior |
+|---------------------------------|-----------------------| --- |
+| unsupported known service       | The service id is a documented NaviLite service, but it is not an executable dashboard command in the current receiver path. Examples include `IMAGE_FRAME_UPDATE_ACK`, `AUTH_REQUEST_ACK`, or other handshake/image services handled elsewhere. | Do not treat as an unknown command. Route it to the responsible subsystem or log it as a known-but-not-actionable service.                         |
+| unknown service                 | The service id is not in the documented service table.                                                                                                                                                                                           | Log the raw service id and payload metadata, then ignore safely.                                                                                         |
+| malformed known service         | The service id is known, but the payload data type, length, or required content does not match the native unpacker branch.                                                                                                                       | Reject the command and log the exact reason. This maps most closely to native unpack status `5` or `6`.                                                  |
+
 ## Frame Types
 
 | Name            | ID | Direction     | Source      | Notes                                    |
@@ -63,6 +88,8 @@ Reference implementation: [`Crc32Mpeg2.kt`](../composeApp/src/commonMain/kotlin/
 |---------|---:|-------------|---------------------------------------------------|
 | VALUE   | 0  | StreetCross | Scalar/small payloads and empty command payloads. |
 | POINTER | 1  | StreetCross | String, image, and larger payloads.               |
+
+## Service Types
 
 | Service                          | ID | Direction     | PayloadDataType | Payload                                                                                     | Notes                                                                                                                                            |
 |----------------------------------|---:|---------------|-----------------|---------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -115,6 +142,18 @@ Reference implementation: [`Crc32Mpeg2.kt`](../composeApp/src/commonMain/kotlin/
 
 Reference: [`ServiceType.kt`](../composeApp/src/commonMain/kotlin/app/pillion/protocol/ServiceType.kt).
 
+## Vehicle Model Detection
+
+The model is derived during authentication from the `lcSwPartNumber` / `SW_Part_Number` value received with `AUTH_REQUEST_SEC_DATA` service `83`:
+
+| StreetCross enum | Ordinal | `SW_Part_Number` substring | Behavior |
+|------------------|--------:|----------------------------|-----|
+| `MODEL_IXWW22`   | 0       | `006-B3952`                | Uses the base LinkCard map layout 480px by 234px. Sends the simpler `NEXT_TURN_DIST_UPDATE` service `4`. |
+| `MODEL_IMWW23`   | 1       | `006-B4160` or `006-B4920` | Uses `layout_imww23_map` 480px by 240px. Sends richer `NAVIGATION_INFO_UPDATE` service `19`, including remaining distance/time and lane bytes. |
+| `MODEL_INVALID`  | 2       | any other or missing value | Falls back to base dimensions/layout and reports an invalid model to callbacks. |
+
+After model detection, StreetCross calls `setHeadunitVehicleInfo` in Garmin OS with the enum ordinal plus height and width. Compatible implementations should treat the software part number as the proven model source and keep service `69` as diagnostic data until real hardware logs prove additional semantics. If the software part number cannot be parsed, compatibility mode should keep both service `4` and service `19` enabled; once the model is known, mirror StreetCross and send service `4` only for `MODEL_IXWW22`/`MODEL_INVALID`, or service `19` only for `MODEL_IMWW23`.
+
 ## Content Types
 
 | Content                        | ID | Source      | Notes                                      |
@@ -124,6 +163,44 @@ Reference: [`ServiceType.kt`](../composeApp/src/commonMain/kotlin/app/pillion/pr
 | FAVORITE_LIST                  | 3  | StreetCross | Favorites list content.                    |
 | STATIONS_LIST                  | 4  | StreetCross | Gas/stations list content.                 |
 | NAVI_IMAGE_FOR_THROUGHPUT_MODE | 11 | StreetCross | Throughput test/navigation image mode.     |
+
+## Turn Arrow Icon Ordinals
+
+StreetCross does not send turn arrow artwork to the dashboard. Garmin's route engine exposes
+`GuidancePoint.getIconOrdinal()`, and StreetCross forwards that byte into
+`NEXT_TURN_DIST_UPDATE`, `NAVIGATION_INFO_UPDATE`, and `TBT_LIST_DATA_UPDATE`. The Yamaha/Garmin
+dashboard owns the icon artwork and renders the matching native icon.
+
+The source enum is `NavInfo.TurnArrowIconType` in Garmin StreetCross 1.86:
+
+| Icon                        | Ordinal | Notes                 |
+|-----------------------------|--------:|-----------------------|
+| `TURN_ARROW_ARRIVING`       | 0       | Destination / arrival |
+| `TURN_ARROW_ARRIVING_L`     | 1       | Arrival on left       |
+| `TURN_ARROW_ARRIVING_R`     | 2       | Arrival on right      |
+| `TURN_ARROW_ARRIVING_VIA`   | 3       | Via point             |
+| `TURN_ARROW_ARRIVING_VIA_L` | 4       | Via point on left     |
+| `TURN_ARROW_ARRIVING_VIA_R` | 5       | Via point on right    |
+| `TURN_ARROW_BEAR_KEEP_L`    | 6       | Keep left             |
+| `TURN_ARROW_BEAR_KEEP_R`    | 7       | Keep right            |
+| `TURN_ARROW_CONTINUE`       | 8       | Continue / straight   |
+| `TURN_ARROW_DRIVE_TO`       | 9       | Drive to              |
+| `TURN_ARROW_EXIT_L`         | 10      | Exit left             |
+| `TURN_ARROW_EXIT_R`         | 11      | Exit right            |
+| `TURN_ARROW_EXIT_UNSPEC`    | 12      | Exit, unknown side    |
+| `TURN_ARROW_FERRY`          | 13      | Ferry                 |
+| `TURN_ARROW_RNDABT_GENERIC` | 14      | Roundabout            |
+| `TURN_ARROW_SHARPTURN_L`    | 32      | Sharp left            |
+| `TURN_ARROW_SHARPTURN_R`    | 33      | Sharp right           |
+| `TURN_ARROW_TURN_L`         | 34      | Left                  |
+| `TURN_ARROW_TURN_R`         | 35      | Right                 |
+| `TURN_ARROW_UTURN_L`        | 36      | U-turn left           |
+| `TURN_ARROW_UTURN_R`        | 37      | U-turn right          |
+| `TURN_ARROW_INV_ICON`       | 69      | Invalid / unknown     |
+
+Roundabout spoke icons also exist at ordinals `15...22`, reverse roundabouts at `23...31`, and
+heading icons at `38...68`. A compatible implementation can send the generic roundabout icon unless
+the routing source gives a reliable exit angle.
 
 ## Route Option Types
 
@@ -144,6 +221,39 @@ Reference: [`ServiceType.kt`](../composeApp/src/commonMain/kotlin/app/pillion/pr
 | BORDER  | 3  |
 | SCHOOL  | 4  |
 | OTHER   | 5  |
+
+## Dashboard Commands
+
+| Dashboard command     | Service | PayloadDataType | Payload                                                                              | Phone action                                                                                                                                                                                                                                                                                                         | Confidence                                                                                                                                                                                                  |
+|-----------------------|--------:|-----------------|--------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| start route from list | 48      | pointer         | `itemIndex UInt16 LE`, `listIndex UInt16 LE`, `routeOption UInt8`                    | Starts the selected dashboard favorite. `NEXT_STOP` inserts a coordinate-backed saved place before the next remaining stop while navigating; `LAST_STOP` appends it as the final intermediate stop. Saved routes can start as `NEW_ROUTE`; they are not inserted as stops because they are route objects, not POIs. | Confirmed by StreetCross dispatch, native `GetStartRouteRequest(short, short, byte)` byte order, and `LinkCardMapManager.v0(...)` route-option behavior.                                                    |
+| stop route            | 49      | value           | empty                                                                                | Stops active route.                                                                                                                                                                                                                                                                                                  | Confirmed by StreetCross dispatch.                                                                                                                                                                          |
+| skip next waypoint    | 50      | value           | empty                                                                                | Skips the next waypoint when one exists.                                                                                                                                                                                                                                                                             | Confirmed by StreetCross dispatch.                                                                                                                                                                          |
+| zoom in               | 51      | value           | empty                                                                                | Increases Yamaha display map zoom multiplier.                                                                                                                                                                                                                                                                        | Confirmed service constant; live command direction still useful to verify.                                                                                                                                  |
+| zoom out              | 52      | value           | empty                                                                                | Decreases Yamaha display map zoom multiplier.                                                                                                                                                                                                                                                                        | Confirmed service constant; live command direction still useful to verify.                                                                                                                                  |
+| go home               | 53      | value           | `routeOption UInt8`, `00`                                                            | Starts navigation to the saved place whose metadata matches a home location.                                                                                                                                                                                                                                         | Confirmed in StreetCross: service `53` dispatches `paramInt1` to `LinkCardMapManager.L(...)`, which calls the same route-start helper as favorite routes. Mirror `NEW_ROUTE`, `NEXT_STOP`, and `LAST_STOP`. |
+| go office             | 54      | value           | `routeOption UInt8`, `00`                                                            | Starts navigation to the saved place whose metadata matches a work/office location.                                                                                                                                                                                                                                  | Confirmed in StreetCross: service `54` dispatches `paramInt1` to the office route-start handler and uses the same `routeOption` behavior. Mirror `NEW_ROUTE`, `NEXT_STOP`, and `LAST_STOP`.                 |
+| start content update  | 55      | value           | live payload `01 00` for navigation image; StreetCross supports `02 00` for TBT-only | Navigation image refreshes nav status, GPS status, app setting, and zoom level. TBT-only sends the current native turn-by-turn list and active index, then pauses JPEG frames.                                                                                                                                       | Navigation image confirmed on physical Yamaha dashboard; TBT-only confirmed from StreetCross decompile.                                                                                                     |
+| stop content update   | 56      | value           | live payload `01 00` for navigation image; StreetCross supports `02 00` for TBT-only | Navigation image sends image-stopped update. TBT-only clears the TBT content mode. If the accessory disconnects after this, return to searching and retry soon.                                                                                                                                                      | Navigation image confirmed on physical Yamaha dashboard; TBT-only confirmed from StreetCross decompile.                                                                                                     |
+
+## Dialog Presets
+
+StreetCross exposes generic dialog packers plus toll-road-specific helper methods. The toll helpers do not use new service ids; they call the generic dialog packers with fixed bytes:
+
+| Helper                                                            | Service | Payload                                                                                                |
+|-------------------------------------------------------------------|--------:|--------------------------------------------------------------------------------------------------------|
+| `getTollRoadConfirmationDialogMessageWithId(dialogID, messageID)` | 25      | `dialogID`, `33` (`DIALOG_YES_NO`), `messageID`, `10` seconds, `4` default response                    |
+| `getTollRoadCannotAvoidDialogMessageWithId(dialogID, messageID)`  | 25      | `dialogID`, `11` (`DIALOG_OK`), `messageID`, `0` seconds, `1` default response                         |
+| `getTollRoadConfirmationDialogMessage(dialogID, message)`         | 32      | `dialogID`, `33` (`DIALOG_YES_NO`), `messageLength`, `10` seconds, `4` default response, message bytes |
+| `getTollRoadCannotAvoidDialogMessage(dialogID, message)`          | 32      | `dialogID`, `11` (`DIALOG_OK`), `messageLength`, `0` seconds, `1` default response, message bytes      |
+
+StreetCross manages dialog lifecycle with a small callback registry:
+
+- Dialog ids are allocated from `1...254`; `255` is treated as invalid/no id available.
+- The sender registers a pending callback before showing a dialog.
+- When service `70` arrives, `dialogID` and `buttonID` are passed to the callback and the pending entry is removed.
+- If the dashboard sends service `70` for an unknown or already-cleared id, StreetCross logs the mismatch and otherwise ignores it.
+- Pending dialogs should be cleared when the NaviLite connection restarts, because dashboard dialogs are session-local.
 
 ## Authentication
 
@@ -181,13 +291,13 @@ Send each frame as **`IMAGE_FRAME_UPDATE` (service 0, `POINTER`)**:
  offset  size  field
    0      1    imageType   observed 3 = expanded navigation view
    1      2    sequence    uint16, little-endian, increments per frame
-   3    var    jpeg        baseline JPEG, 480 × 240
+   3    var    jpeg        baseline JPEG, 480 × 240 or 480 × 236
 ```
 
 The dash decodes the JPEG and replies **`IMAGE_ACK` (80)**. The sender waits for the ack (skipping any
 other frames that arrive) before sending the next image, which naturally paces throughput.
 
-- **Resolution:** 480 × 240.
+- **Resolution:** 480 × 240 or 480 × 236.
 - **Throughput:** roughly **14–15 fps** at JPEG quality ≈ 40 on a fast phone over Bluetooth; higher
   quality → larger frames → fewer fps. The frame rate emerges from encode + Bluetooth throughput; it
   is not commanded.
@@ -202,7 +312,7 @@ dash → AUTH_REQUEST_SEC_DATA(83)        # ("partnumber"+nonce) XOR 0x0A
 phone → AUTH_REQUEST_SEC_DATA_ACK(84)   # nonce XOR 0x0A
 phone → setup burst (nav status, day/night, gps, zoom, ...)
 loop:
-  phone → IMAGE_FRAME_UPDATE(0)         # imageType + seq + JPEG(480x240)
+  phone → IMAGE_FRAME_UPDATE(0)         # imageType + seq + JPEG(480x240 or 480×236)
   dash  → IMAGE_ACK(80)
 ```
 
