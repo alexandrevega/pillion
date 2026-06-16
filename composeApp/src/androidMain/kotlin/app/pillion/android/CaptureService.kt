@@ -74,16 +74,30 @@ class CaptureService : Service() {
      * dash while locked**. The helper only encodes while locked, so it costs no extra battery idle.
      */
     private fun startSession(quality: Int, maxFps: Int, dashResolution: DashResolution) {
-        // Must be foreground (mediaProjection) before acquiring the projection (Android 10+).
-        startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        // A screen-capture grant is single-use. If it's missing or stale (e.g. cleared when the app
+        // crashed + restarted), starting a mediaProjection foreground service throws SecurityException
+        // — which would HARD-CRASH the app. So validate first, and on a stale grant fall back to a
+        // non-projection foreground type + a clean "re-grant" message instead of crashing.
         val data = resultData
         if (resultCode == 0 || data == null) {
-            fail("screen capture not granted"); return
+            runCatching { startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE) }
+            fail("Screen capture not granted — tap Start again"); return
+        }
+        // Must be foreground (mediaProjection) before acquiring the projection (Android 10+).
+        try {
+            startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "media projection FGS rejected — stale capture grant", e)
+            resultCode = 0; resultData = null
+            runCatching { startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE) }
+            fail("Screen capture expired — tap Start again"); return
         }
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val projection = mpm.getMediaProjection(resultCode, data) ?: run {
             fail("screen capture denied"); return
         }
+        // The grant is single-use; clear it so a later restart can't reuse a dead token (→ crash).
+        resultCode = 0; resultData = null
         // Create the mirror display NOW, while the projection token is fresh.
         val mirror = MediaProjectionScreenSource(this, projection, quality)
         runCatching { mirror.start() }
