@@ -205,7 +205,10 @@ class CaptureService : Service() {
         // orphan it stays a direct child of adbd and dies. After spawn the helper serves frames over
         // loopback (127.0.0.1:28115) and the app drives PROMOTE/DEMOTE/QUIT over that same socket, so
         // no network is needed for the rest of the session — this is what makes the no-wifi ride work.
-        val inner = "CLASSPATH=\$(pm path $packageName | grep base.apk | cut -d: -f2) " +
+        // Include SYSTEMSERVERCLASSPATH so the helper can load com.android.server.display.DisplayControl
+        // on its main classloader (needed to turn the phone's panel off via SurfaceControl while keeping
+        // the device awake — see DashServer.mainDisplayToken).
+        val inner = "CLASSPATH=\$(pm path $packageName | grep base.apk | cut -d: -f2):\$SYSTEMSERVERCLASSPATH " +
             "app_process / app.pillion.server.DashServer " +
             "${dashResolution.width} ${dashResolution.height} 160 $quality 480 240 " +
             "</dev/null >/dev/null 2>&1 &"
