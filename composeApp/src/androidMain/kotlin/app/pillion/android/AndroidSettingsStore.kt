@@ -1,6 +1,7 @@
 package app.pillion.android
 
 import android.content.Context
+import app.pillion.core.DashResolution
 import app.pillion.core.SettingsStore
 import app.pillion.core.ThemeMode
 
@@ -16,7 +17,22 @@ class AndroidSettingsStore(context: Context) : SettingsStore {
         prefs.edit().putString(KEY_THEME, mode.name).apply()
     }
 
+    override fun dashEnabled(): Boolean = prefs.getBoolean(KEY_DASH_ENABLED, false)
+
+    override fun setDashEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_DASH_ENABLED, enabled).apply()
+    }
+
+    override fun dashResolution(): DashResolution =
+        DashResolution.fromName(prefs.getString(KEY_DASH_RESOLUTION, null))
+
+    override fun setDashResolution(resolution: DashResolution) {
+        prefs.edit().putString(KEY_DASH_RESOLUTION, resolution.name).apply()
+    }
+
     private companion object {
         const val KEY_THEME = "theme_mode"
+        const val KEY_DASH_ENABLED = "dash_enabled"
+        const val KEY_DASH_RESOLUTION = "dash_resolution"
     }
 }

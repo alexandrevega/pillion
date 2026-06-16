@@ -20,7 +20,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -28,13 +30,19 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.pillion.core.AppInfo
+import app.pillion.core.DashResolution
 import app.pillion.core.ThemeMode
 import app.pillion.core.UpdateInfo
 import app.pillion.resources.Res
@@ -60,6 +69,12 @@ internal fun SettingsScreen(
     onMaxFps: (Int) -> Unit,
     themeMode: ThemeMode,
     onThemeMode: (ThemeMode) -> Unit,
+    dashSupported: Boolean = false,
+    dashEnabled: Boolean = false,
+    dashResolution: DashResolution = DashResolution.DEFAULT,
+    onDashResolution: (DashResolution) -> Unit = {},
+    onSetUpDash: () -> Unit = {},
+    onDisableDash: () -> Unit = {},
     update: UpdateInfo?,
     onBack: () -> Unit,
 ) {
@@ -157,6 +172,47 @@ internal fun SettingsScreen(
             modifier = Modifier.padding(start = 6.dp, top = 8.dp, end = 6.dp),
         )
 
+        if (dashSupported) {
+            Spacer(Modifier.height(24.dp))
+            SectionHeader("Dedicated dash display (experimental)")
+            SettingsGroup {
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (dashEnabled) "On" else "Off",
+                            style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            "Keep your nav app on the dash with the phone screen off.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (dashEnabled) {
+                        OutlinedButton(onClick = onDisableDash, shape = RoundedCornerShape(12.dp)) { Text("Disable") }
+                    } else {
+                        Button(onClick = onSetUpDash, shape = RoundedCornerShape(12.dp)) { Text("Set up") }
+                    }
+                }
+                if (dashEnabled) {
+                    GroupDivider()
+                    LinkRow("Re-run setup (after a restart)") { onSetUpDash() }
+                }
+                GroupDivider()
+                DashResolutionSelector(dashResolution, onDashResolution)
+            }
+            Text(
+                "Casts the real app to the dash in landscape with the screen off. Needs a one-time " +
+                    "Wireless-debugging setup before each ride, redone after a phone restart.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 6.dp, top = 8.dp, end = 6.dp),
+            )
+        }
+
         Spacer(Modifier.height(24.dp))
         SectionHeader("About")
         SettingsGroup {
@@ -225,6 +281,114 @@ private fun SettingSlider(
             )
         }
         Slider(value = current, onValueChange = onChange, valueRange = min..max)
+    }
+}
+
+@Composable
+private fun DashResolutionSelector(
+    selected: DashResolution,
+    onSelect: (DashResolution) -> Unit,
+) {
+    var choosing by remember { mutableStateOf(false) }
+
+    Row(
+        Modifier.fillMaxWidth().clickable { choosing = true }.padding(vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Virtual display size", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "${selected.label} - ${resolutionDetail(selected)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text(
+            "Change",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+        )
+    }
+
+    if (choosing) {
+        AlertDialog(
+            onDismissRequest = { choosing = false },
+            title = { Text("Virtual display size") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "Used for Waze and Maps layout. Frames still output to the dash at 480 x 240.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                    DashResolution.values().forEachIndexed { index, option ->
+                        ResolutionDialogRow(
+                            option = option,
+                            selected = option == selected,
+                            onClick = {
+                                onSelect(option)
+                                choosing = false
+                            },
+                        )
+                        if (index != DashResolution.values().lastIndex) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { choosing = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun ResolutionDialogRow(
+    option: DashResolution,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                option.label,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                resolutionDetail(option),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (selected) {
+            Icon(
+                Icons.Filled.Check,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
+}
+
+private fun resolutionDetail(option: DashResolution): String {
+    val tenths = option.width * 10 / DashResolution.Native.width
+    val scale = if (tenths % 10 == 0) "${tenths / 10}x" else "${tenths / 10}.${tenths % 10}x"
+    return when (option) {
+        DashResolution.Native -> "Native panel size"
+        DashResolution.Balanced -> "$scale render scale, default"
+        DashResolution.R1920 -> "$scale render scale, highest CPU"
+        else -> "$scale render scale"
     }
 }
 
