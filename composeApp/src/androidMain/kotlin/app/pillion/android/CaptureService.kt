@@ -109,6 +109,9 @@ class CaptureService : Service() {
             }
             registerScreenReceiver()
             registerKeyguardUnlockListener()
+            // Self-heal: if the helper is killed (adbd restart on Wi-Fi/debug loss), respawn it over
+            // the loopback channel so the dash recovers instead of freezing.
+            DashHelper.startWatchdog(this, quality, dashResolution)
             switch
         } else {
             mirror
@@ -351,6 +354,7 @@ class CaptureService : Service() {
 
     override fun onDestroy() {
         engine?.stop()
+        DashHelper.stopWatchdog() // stop first, so it doesn't respawn the helper we're tearing down
         screenReceiver?.let { runCatching { unregisterReceiver(it) } }
         unregisterKeyguardUnlockListener()
         // The helper is detached (orphaned to init), so it won't die on its own. Tell it to QUIT over

@@ -100,7 +100,27 @@ class PillionAdb private constructor(
      */
     fun openExecStream(command: String): AdbStream = openStream("exec:$command")
 
+    /**
+     * Switch adbd to classic TCP mode on [port] (the same request `adb tcpip` sends). adbd then also
+     * listens on **`127.0.0.1`**, a privileged channel that stays up with **no Wi-Fi** — unlike the
+     * mDNS Wireless-debugging port, which dies when Wi-Fi drops. adbd restarts, so this connection is
+     * gone afterwards; the caller reconnects with `connectDevice("127.0.0.1", port)`. That gives the
+     * dash a channel it can use to **respawn the helper offline** if it ever gets killed.
+     */
+    fun enableTcpip(port: Int = TCPIP_PORT) {
+        runCatching {
+            val stream = openStream("tcpip:$port")
+            runCatching { stream.openInputStream().readBytes() } // adbd acks, then restarts
+            runCatching { stream.close() }
+        }
+        runCatching { close() } // the old (wireless) connection is dead now
+    }
+
     companion object {
+        /** Loopback adb (always up, no Wi-Fi) once [enableTcpip] has run. */
+        const val LOOPBACK_HOST = "127.0.0.1"
+        const val TCPIP_PORT = 5555
+
         @Volatile private var instance: PillionAdb? = null
 
         fun getInstance(context: Context): PillionAdb =
