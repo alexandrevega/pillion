@@ -15,9 +15,9 @@
 	<!-- Must match the container app (iosApp/Info.plist) exactly, or iOS/sideloaders reject the
 	     extension — which silently breaks the broadcast picker. -->
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.2.0-alpha</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>UISupportedExternalAccessoryProtocols</key>
 	<array>
 		<string>com.garmin.navilite.data</string>
