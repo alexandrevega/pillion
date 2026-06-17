@@ -71,6 +71,10 @@ android {
         versionCode = 1
         versionName = "0.1.0-alpha"
     }
+    // Exposes VERSION_NAME so AppInfo.VERSION reads the build's own version (not a hardcoded copy).
+    buildFeatures {
+        buildConfig = true
+    }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
