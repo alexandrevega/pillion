@@ -11,9 +11,11 @@ import android.bluetooth.BluetoothSocket
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.location.Location
+import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import app.pillion.core.ByteChannel
@@ -31,37 +33,47 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
 /**
- * LIVE, GPS-driven turn-by-turn that survives the screen being off.
+ * Live turn-by-turn navigation to the dash, screen-off-safe (foreground service).
  *
- * Foreground service (connectedDevice) that connects to the dash, sends the WHOLE route as a native
- * TBT list, then drives guidance from the phone's GPS: each fix is snapped to the route to derive
- * the active maneuver + distance-to-turn, which it streams to the dash. As the position moves the
- * cues advance — real navigation. With the screen off the foreground service keeps it running.
+ * Routes origin → destination via HERE, sends the WHOLE route as a native TBT list, then drives
+ * guidance from position fixes: each fix snaps to the route to yield the active maneuver + distance,
+ * streamed to the dash (plus a self-rendered map JPEG in image mode). Two position sources:
+ *  - LIVE GPS (the bike): real LocationManager fixes — origin defaults to the current fix.
+ *  - SIM (the desk): mock fixes stepped along the route, so progress is visible while stationary.
  *
- *   Enable mock GPS (desk demo):  adb shell appops set app.pillion android:mock_location allow
- *   Start: adb shell am start-foreground-service -n app.pillion/app.pillion.android.NavService
- *   Stop:  adb shell am stopservice              -n app.pillion/app.pillion.android.NavService
- *   Watch: adb logcat -s PillionNav
- *
- * At a desk we feed movement by injecting mock fixes stepped along the route into the GPS test
- * provider; the guidance reads them back as normal GPS. On the bike, drop the injector — real GPS
- * fixes flow through the identical path.
+ * Extras: dlat/dlng (destination), olat/olng (origin; omit to use current GPS), live (bool),
+ * mode ("image" default | "tbt"). Start via NavDevActivity or:
+ *   adb shell am start-foreground-service -n app.pillion/app.pillion.android.NavService \
+ *     --ed dlat 52.3791 --ed dlng 4.9003 --ez live false
  */
 class NavService : Service() {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val fixes = Channel<Location>(Channel.CONFLATED)
+    private var locListener: LocationListener? = null
+
+    private var imageMode = true
+    private var liveGps = false
+    private var origin: LatLng? = null
+    private var dest = LatLng(52.3791, 4.9003)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private var imageMode = true
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        imageMode = intent?.getStringExtra("mode") != "tbt" // default: image (map + overlay)
+        imageMode = intent?.getStringExtra("mode") != "tbt"
+        liveGps = intent?.getBooleanExtra("live", false) == true
+        intent?.let {
+            if (it.hasExtra("dlat")) dest = LatLng(it.getDoubleExtra("dlat", dest.lat), it.getDoubleExtra("dlng", dest.lng))
+            origin = if (it.hasExtra("olat")) LatLng(it.getDoubleExtra("olat", 0.0), it.getDoubleExtra("olng", 0.0)) else null
+        }
         startAsForeground()
         scope.launch {
             runCatching { navigate() }.onFailure { Log.e(TAG, "nav failed", it) }
@@ -71,6 +83,7 @@ class NavService : Service() {
     }
 
     override fun onDestroy() {
+        locListener?.let { l -> runCatching { getSystemService(LocationManager::class.java).removeUpdates(l) } }
         scope.cancel()
         super.onDestroy()
     }
@@ -87,34 +100,49 @@ class NavService : Service() {
             .setOngoing(true)
             .build()
         if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTI_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            if (liveGps) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            startForeground(NOTI_ID, n, type)
         } else {
             startForeground(NOTI_ID, n)
         }
     }
 
-    @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT / ACCESS_FINE_LOCATION granted via adb
+    @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT / ACCESS_FINE_LOCATION granted by the app
     private suspend fun navigate() {
         val adapter = BluetoothAdapter.getDefaultAdapter() ?: error("no Bluetooth adapter")
-        val dash = adapter.getRemoteDevice(DASH_MAC)
-        if (dash.bondState != BluetoothDevice.BOND_BONDED) {
-            dash.createBond()
+        val dashDev = adapter.getRemoteDevice(DASH_MAC)
+        if (dashDev.bondState != BluetoothDevice.BOND_BONDED) {
+            dashDev.createBond()
             var t = 0
-            while (dash.bondState != BluetoothDevice.BOND_BONDED && t++ < 40) delay(500)
-            check(dash.bondState == BluetoothDevice.BOND_BONDED) { "pairing failed" }
+            while (dashDev.bondState != BluetoothDevice.BOND_BONDED && t++ < 40) delay(500)
+            check(dashDev.bondState == BluetoothDevice.BOND_BONDED) { "pairing failed" }
         }
         runCatching { adapter.cancelDiscovery() }
-        val socket = dash.createInsecureRfcommSocketToServiceRecord(SPP)
+        val socket = dashDev.createInsecureRfcommSocketToServiceRecord(SPP)
         socket.connect()
         val channel = socketChannel(socket)
         try {
             val reader = FrameReader(channel)
             Handshake(channel, reader).perform()
+
             val key = hereApiKeyOrEmpty()
             check(key.isNotBlank()) { "no HERE key — set here.api.key in local.properties" }
-            val result = HereRoutingProvider(apiKey = key).route(
-                RouteRequest(origin = LatLng(52.3463, 4.8889), destination = LatLng(52.3791, 4.9003)),
-            )
+
+            val lm = getSystemService(LocationManager::class.java)
+            if (liveGps) startLiveUpdates(lm)
+
+            val from = origin ?: if (liveGps) {
+                Log.i(TAG, "waiting for first GPS fix…")
+                val f = withTimeoutOrNull(25_000) { fixes.receive() } ?: error("no GPS fix in 25s")
+                LatLng(f.latitude, f.longitude)
+            } else {
+                LatLng(52.3463, 4.8889) // desk default origin
+            }
+            Log.i(TAG, "routing ${"%.5f".format(from.lat)},${"%.5f".format(from.lng)} -> " +
+                "${"%.5f".format(dest.lat)},${"%.5f".format(dest.lng)} (live=$liveGps, image=$imageMode)")
+
+            val result = HereRoutingProvider(apiKey = key).route(RouteRequest(origin = from, destination = dest))
             val route = (result as? RouteResult.Success)?.routes?.firstOrNull()
                 ?: error("routing failed: $result")
             val steps = route.steps
@@ -123,30 +151,17 @@ class NavService : Service() {
             val cum = Guidance.cumulative(geometry)
             val maneuverDist = Guidance.maneuverDistances(steps)
             val total = cum.last()
-            Log.i(TAG, "route: ${steps.size} maneuvers, ${total.toInt()} m geometry — sending list, going live")
+            Log.i(TAG, "route: ${steps.size} maneuvers, ${total.toInt()} m")
 
-            channel.write(NaviLiteTbt.contentUpdate(tbtOnly = !imageMode)) // 01 00 map image, 02 00 TBT-only
-            for (frame in NaviLiteTbt.routeList(steps)) channel.write(frame)   // the WHOLE route
+            channel.write(NaviLiteTbt.contentUpdate(tbtOnly = !imageMode))
+            for (frame in NaviLiteTbt.routeList(steps)) channel.write(frame)
 
-            val lm = getSystemService(LocationManager::class.java)
-            runCatching { setupMockGps(lm) }.onFailure { Log.w(TAG, "mock GPS unavailable: ${it.message}") }
-
-            // Image mode: render the map ourselves (CPU Canvas -> JPEG; works screen-off) and stream
-            // it as image frames alongside the structured overlay. A drain coroutine consumes the
-            // dash's IMAGE_ACKs so the socket's receive buffer doesn't back up.
             val renderer = if (imageMode) NavMapRenderer() else null
             val drain = if (imageMode) scope.launch { runCatching { while (isActive) reader.next() } } else null
             var seq = 0
-            Log.i(TAG, "mode=${if (imageMode) "image (map + overlay)" else "tbt-only"}")
-
-            // Drive movement along the route (~14 m/s ≈ 50 km/h). The position 'here' is the GPS
-            // fix; we mirror it onto the system GPS test provider (best-effort) and run guidance on
-            // it -> stream the active maneuver live. On the bike, 'here' comes from real GPS fixes.
-            var along = 0.0
             var lastActive = -1
-            while (along <= total && scope.isActive) {
-                val here = Guidance.pointAt(geometry, cum, along)
-                pushFix(lm, here)
+
+            suspend fun emit(here: LatLng): Double {
                 val distAlong = Guidance.snapDistance(geometry, cum, here)
                 val prog = Guidance.progress(maneuverDist, distAlong)
                 val step = steps[prog.activeIndex]
@@ -161,20 +176,46 @@ class NavService : Service() {
                         nextRoad = step.roadName ?: "",
                     ),
                 )
-                if (renderer != null) {
-                    channel.write(NaviLiteTbt.imageFrame(seq++, renderer.render(geometry, here)))
+                if (renderer != null) channel.write(NaviLiteTbt.imageFrame(seq++, renderer.render(geometry, here)))
+                Log.i(TAG, "here ${"%.5f".format(here.lat)},${"%.5f".format(here.lng)} -> " +
+                    "active ${prog.activeIndex}/${steps.size} ${step.maneuver} in ${prog.remainingMeters}m")
+                return distAlong
+            }
+
+            if (liveGps) {
+                Log.i(TAG, "LIVE GPS guidance")
+                while (scope.isActive) {
+                    val loc = fixes.receive()
+                    val distAlong = emit(LatLng(loc.latitude, loc.longitude))
+                    if (distAlong >= total - ARRIVE_THRESHOLD_M) { Log.i(TAG, "arrived"); break }
                 }
-                Log.i(TAG, "gps ${"%.5f".format(here.lat)},${"%.5f".format(here.lng)} " +
-                    "-> active ${prog.activeIndex}/${steps.size} ${step.maneuver} in ${prog.remainingMeters}m")
-                delay(1000)
-                along += 14.0
+            } else {
+                Log.i(TAG, "SIM guidance (mock fixes along the route)")
+                runCatching { setupMockGps(lm) }.onFailure { Log.w(TAG, "mock GPS off: ${it.message}") }
+                var along = 0.0
+                while (along <= total && scope.isActive) {
+                    val here = Guidance.pointAt(geometry, cum, along)
+                    pushFix(lm, here)
+                    emit(here)
+                    delay(1000)
+                    along += 14.0
+                }
             }
             drain?.cancel()
-            Log.i(TAG, "arrived — navigation complete")
+            Log.i(TAG, "navigation complete")
             delay(1000)
         } finally {
             channel.close()
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun startLiveUpdates(lm: LocationManager) = withContext(Dispatchers.Main) {
+        val l = LocationListener { loc -> fixes.trySend(loc) }
+        locListener = l
+        runCatching {
+            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, l, Looper.getMainLooper())
+        }.onFailure { Log.w(TAG, "GPS updates unavailable: ${it.message}") }
     }
 
     private fun setupMockGps(lm: LocationManager) {
@@ -211,7 +252,8 @@ class NavService : Service() {
         const val CHANNEL = "pillion_nav"
         const val NOTI_ID = 42
         const val GPS = LocationManager.GPS_PROVIDER
-        // Fedora dev-dash Bluetooth adapter (advertises as "YCCU-dev").
+        const val ARRIVE_THRESHOLD_M = 25.0
+        // Fedora dev-dash Bluetooth adapter (advertises as "YCCU-dev"). Change for another dash.
         const val DASH_MAC = "4C:03:4F:0A:DC:AE"
         val SPP: UUID = UUID.fromString("00007220-0000-1000-8000-00805F9B34FB")
     }

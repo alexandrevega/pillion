@@ -1,107 +1,124 @@
 package app.pillion.android
 
-import android.annotation.SuppressLint
-import android.app.Activity
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothSocket
+import android.Manifest
+import android.content.Intent
 import android.os.Bundle
-import android.util.Log
-import app.pillion.core.ByteChannel
-import app.pillion.core.FrameReader
-import app.pillion.core.Handshake
-import app.pillion.nav.HereRoutingProvider
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import app.pillion.nav.HereGeocoder
 import app.pillion.nav.LatLng
-import app.pillion.nav.NaviLiteTbt
-import app.pillion.nav.RouteRequest
-import app.pillion.nav.RouteResult
 import app.pillion.nav.hereApiKeyOrEmpty
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.UUID
+import kotlinx.coroutines.withContext
 
 /**
- * Dev-only: drive a real HERE route -> NaviLite turn-by-turn over the bonded dash (RFCOMM).
+ * Dev navigation launcher: type a destination (address or lat,lng), optionally an origin (defaults
+ * to current GPS), pick Live GPS (the bike) or Simulate (the desk), and start [NavService].
  *
- *   Launch:  adb shell am start -n app.pillion/app.pillion.android.NavDevActivity
- *   Watch:   adb logcat -s PillionNav
- *
- * Pairs with the dev dash by MAC if needed, runs the real handshake, fetches a HERE route via the
- * shared NavEngine, and streams the structured turn-by-turn frames (content-update 02 00 + per
- * maneuver). The dash (real Garmin or the navilite-receiver emulator) renders the cues natively.
+ *   adb shell am start -n app.pillion/app.pillion.android.NavDevActivity   (or its launcher icon)
  */
-class NavDevActivity : Activity() {
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
+class NavDevActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        scope.launch { runCatching { drive() }.onFailure { Log.e(TAG, "nav dev failed", it) } }
-    }
-
-    @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT granted via adb for this dev tool
-    private suspend fun drive() {
-        val adapter = BluetoothAdapter.getDefaultAdapter() ?: error("no Bluetooth adapter")
-        val dash = adapter.getRemoteDevice(DASH_MAC)
-
-        if (dash.bondState != BluetoothDevice.BOND_BONDED) {
-            Log.i(TAG, "pairing with $DASH_MAC …")
-            dash.createBond()
-            var tries = 0
-            while (dash.bondState != BluetoothDevice.BOND_BONDED && tries++ < 40) delay(500)
-            check(dash.bondState == BluetoothDevice.BOND_BONDED) { "pairing failed (state=${dash.bondState})" }
-        }
-        Log.i(TAG, "bonded with ${dash.name ?: dash.address}; opening RFCOMM (SPP 0x7220) …")
-        runCatching { adapter.cancelDiscovery() }
-        val socket = dash.createInsecureRfcommSocketToServiceRecord(SPP)
-        socket.connect()
-        val channel = socketChannel(socket)
-
-        try {
-            Handshake(channel, FrameReader(channel)).perform()
-            Log.i(TAG, "handshake OK; fetching HERE route …")
-
-            val key = hereApiKeyOrEmpty()
-            check(key.isNotBlank()) { "no HERE key — set here.api.key in local.properties" }
-            val result = HereRoutingProvider(apiKey = key).route(
-                RouteRequest(origin = LatLng(52.3463, 4.8889), destination = LatLng(52.3791, 4.9003)),
+        runCatching {
+            requestPermissions(
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.POST_NOTIFICATIONS),
+                1,
             )
-            val route = (result as? RouteResult.Success)?.routes?.firstOrNull()
-                ?: error("routing failed: $result")
-            Log.i(TAG, "HERE: ${route.distanceMeters} m, +${route.trafficDelaySeconds}s traffic, " +
-                "${route.steps.size} maneuvers")
+        }
+        setContent { MaterialTheme { NavDevScreen() } }
+    }
 
-            channel.write(NaviLiteTbt.contentUpdate(tbtOnly = true))   // 02 00: dash renders TBT, no JPEG
-            for (step in route.steps) {
-                for (frame in NaviLiteTbt.framesFor(step, step.distanceMeters.toFloat())) {
-                    channel.write(frame)
-                }
-                Log.i(TAG, "  sent icon ${NaviLiteTbt.iconOf(step.maneuver)} ${step.maneuver} " +
-                    "${step.distanceMeters}m -> ${step.roadName ?: ""}")
-                delay(150)
+    @Composable
+    private fun NavDevScreen() {
+        val scope = rememberCoroutineScope()
+        var dest by remember { mutableStateOf("") }
+        var origin by remember { mutableStateOf("") }
+        var useCurrent by remember { mutableStateOf(true) }
+        var live by remember { mutableStateOf(true) }
+        var status by remember { mutableStateOf("Enter a destination, then Start.") }
+
+        Column(
+            Modifier.fillMaxSize().padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text("Pillion — live navigation (dev)", style = MaterialTheme.typography.titleLarge)
+            OutlinedTextField(
+                value = dest, onValueChange = { dest = it },
+                label = { Text("Destination (address or lat,lng)") },
+                singleLine = true, modifier = Modifier.fillMaxWidth(),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(checked = useCurrent, onCheckedChange = { useCurrent = it })
+                Text("  Use current location as origin")
             }
-            Log.i(TAG, "done — ${route.steps.size} maneuvers sent to the dash")
-            delay(800)
-        } finally {
-            channel.close()
+            if (!useCurrent) {
+                OutlinedTextField(
+                    value = origin, onValueChange = { origin = it },
+                    label = { Text("Origin (address or lat,lng)") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(checked = live, onCheckedChange = { live = it })
+                Text("  Live GPS (off = simulate along route)")
+            }
+            Button(
+                onClick = {
+                    scope.launch {
+                        status = "resolving…"
+                        val d = resolve(dest)
+                        if (d == null) { status = "destination not found"; return@launch }
+                        val o = if (useCurrent) null else resolve(origin)
+                        if (!useCurrent && o == null) { status = "origin not found"; return@launch }
+                        val intent = Intent(this@NavDevActivity, NavService::class.java).apply {
+                            putExtra("dlat", d.lat); putExtra("dlng", d.lng)
+                            if (o != null) { putExtra("olat", o.lat); putExtra("olng", o.lng) }
+                            putExtra("live", live)
+                        }
+                        startForegroundService(intent)
+                        status = "navigating → ${"%.5f".format(d.lat)}, ${"%.5f".format(d.lng)}" +
+                            if (live) "  (live GPS)" else "  (simulated)"
+                    }
+                },
+                enabled = dest.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Start navigation") }
+            Text(status, style = MaterialTheme.typography.bodyMedium)
         }
     }
 
-    private fun socketChannel(socket: BluetoothSocket): ByteChannel = object : ByteChannel {
-        private val inp = socket.inputStream
-        private val out = socket.outputStream
-        override fun open() {}
-        override fun write(bytes: ByteArray) { out.write(bytes); out.flush() }
-        override fun read(buffer: ByteArray): Int = inp.read(buffer)
-        override fun close() { runCatching { socket.close() } }
+    /** Parse "lat,lng" directly, else geocode the address via HERE. */
+    private suspend fun resolve(query: String): LatLng? {
+        parseLatLng(query)?.let { return it }
+        val key = hereApiKeyOrEmpty()
+        if (key.isBlank()) return null
+        return withContext(Dispatchers.IO) { HereGeocoder(key).geocode(query) }
     }
 
-    private companion object {
-        const val TAG = "PillionNav"
-        // Fedora dev-dash Bluetooth adapter (advertises as "YCCU-dev"). Change for another dash.
-        const val DASH_MAC = "4C:03:4F:0A:DC:AE"
-        val SPP: UUID = UUID.fromString("00007220-0000-1000-8000-00805F9B34FB")
+    private fun parseLatLng(s: String): LatLng? {
+        val m = Regex("""^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$""").find(s) ?: return null
+        return LatLng(m.groupValues[1].toDouble(), m.groupValues[2].toDouble())
     }
 }
