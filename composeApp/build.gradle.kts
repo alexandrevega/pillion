@@ -72,6 +72,14 @@ val keystoreProperties = Properties().apply {
     if (keystorePropertiesFile.exists()) FileInputStream(keystorePropertiesFile).use { load(it) }
 }
 
+// HERE API key for dev/testing is read from the gitignored local.properties (key: here.api.key)
+// and exposed via BuildConfig. It never enters git — it only lands in your local debug build.
+val localProperties = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) FileInputStream(f).use { load(it) }
+}
+val hereApiKey: String = (localProperties.getProperty("here.api.key") ?: "").trim()
+
 android {
     namespace = "app.pillion"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
@@ -82,6 +90,7 @@ android {
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 2
         versionName = "0.2.0-alpha"
+        buildConfigField("String", "HERE_API_KEY", "\"$hereApiKey\"")
     }
     // Exposes VERSION_NAME so AppInfo.VERSION reads the build's own version (not a hardcoded copy).
     buildFeatures {

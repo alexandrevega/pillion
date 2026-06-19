@@ -57,6 +57,20 @@
             android:exported="true"
             android:label="Pillion ADB setup (dev)" />
 
+        <!-- Dev-only: HERE route -> NaviLite turn-by-turn over the bonded dash. Launch via:
+             adb shell am start -n app.pillion/app.pillion.android.NavDevActivity -->
+        <activity
+            android:name="app.pillion.android.NavDevActivity"
+            android:exported="true"
+            android:label="Pillion Nav (dev)" />
+
+        <!-- Dev-only: LIVE GPS-driven turn-by-turn (foreground service). Start via:
+             adb shell am start-foreground-service -n app.pillion/app.pillion.android.NavService -->
+        <service
+            android:name="app.pillion.android.NavService"
+            android:exported="true"
+            android:foregroundServiceType="connectedDevice" />
+
         <receiver
             android:name="app.pillion.android.AdbPairingCodeReceiver"
             android:exported="false" />
