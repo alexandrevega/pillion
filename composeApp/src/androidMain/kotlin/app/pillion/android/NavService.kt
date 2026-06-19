@@ -194,6 +194,7 @@ class NavService : Service() {
                                 maneuverIcon = NaviLiteTbt.iconOf(step.maneuver),
                                 distanceMeters = prog.remainingMeters,
                                 roadName = step.roadName ?: "",
+                                trafficSpans = route.trafficSpans,
                             ),
                         ),
                     )

@@ -47,6 +47,7 @@ class HereRoutingProvider(
                     append("lang", request.language)
                     // 'actions' requires 'polyline'; omit departureTime entirely for live traffic.
                     append("return", "polyline,summary,actions,instructions")
+                    append("spans", "dynamicSpeedInfo") // per-segment live traffic
                     append("apiKey", apiKey)
                 }
             }.body()
@@ -138,6 +139,9 @@ internal data class HereRoute(val sections: List<HereSection> = emptyList()) {
             steps = steps,
             encodedGeometry = section.polyline,
             geometryFormat = section.polyline?.let { GeometryFormat.HERE_FLEXIBLE_POLYLINE },
+            trafficSpans = section.spans.map {
+                TrafficSpan(it.offset, trafficLevelOf(it.dynamicSpeedInfo?.trafficSpeed, it.dynamicSpeedInfo?.baseSpeed))
+            },
         )
     }
 }
@@ -147,7 +151,25 @@ internal data class HereSection(
     val summary: HereSummary? = null,
     val actions: List<HereAction> = emptyList(),
     val polyline: String? = null,
+    val spans: List<HereSpan> = emptyList(),
 )
+
+@Serializable
+internal data class HereSpan(val offset: Int = 0, val dynamicSpeedInfo: HereDyn? = null)
+
+@Serializable
+internal data class HereDyn(val trafficSpeed: Double? = null, val baseSpeed: Double? = null)
+
+/** trafficSpeed/baseSpeed ratio -> congestion level. */
+internal fun trafficLevelOf(trafficSpeed: Double?, baseSpeed: Double?): TrafficLevel {
+    if (trafficSpeed == null || baseSpeed == null || baseSpeed <= 0.0) return TrafficLevel.UNKNOWN
+    val r = trafficSpeed / baseSpeed
+    return when {
+        r >= 0.75 -> TrafficLevel.FREE
+        r >= 0.5 -> TrafficLevel.SLOW
+        else -> TrafficLevel.JAM
+    }
+}
 
 @Serializable
 internal data class HereSummary(

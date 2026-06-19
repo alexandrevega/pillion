@@ -47,6 +47,12 @@ data class RouteStep(
 /** Encoding of [Route.encodedGeometry] — providers differ, so the consumer knows how to decode. */
 enum class GeometryFormat { HERE_FLEXIBLE_POLYLINE, ENCODED_POLYLINE_5, GEOJSON }
 
+/** Live-traffic state of a route segment, for coloring the route line. */
+enum class TrafficLevel { FREE, SLOW, JAM, UNKNOWN }
+
+/** A traffic state starting at geometry index [offset], running until the next span. */
+data class TrafficSpan(val offset: Int, val level: TrafficLevel)
+
 /**
  * A computed route.
  *
@@ -61,6 +67,8 @@ data class Route(
     /** Encoded geometry exactly as the provider returned it. Decode per [geometryFormat] to render. */
     val encodedGeometry: String?,
     val geometryFormat: GeometryFormat?,
+    /** Per-segment live traffic (empty if the provider didn't supply it). */
+    val trafficSpans: List<TrafficSpan> = emptyList(),
 ) {
     val trafficDelaySeconds: Int get() = (durationSeconds - baseDurationSeconds).coerceAtLeast(0)
 }

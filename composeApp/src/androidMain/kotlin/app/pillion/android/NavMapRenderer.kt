@@ -8,6 +8,8 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.util.LruCache
 import app.pillion.nav.LatLng
+import app.pillion.nav.TrafficLevel
+import app.pillion.nav.TrafficSpan
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -63,6 +65,7 @@ class NavMapRenderer(
         maneuverIcon: Int = -1,
         distanceMeters: Int = -1,
         roadName: String = "",
+        trafficSpans: List<TrafficSpan> = emptyList(),
         quality: Int = 75,
     ): ByteArray {
         val worldPx = (1 shl zoom) * TILE.toDouble()
@@ -84,14 +87,16 @@ class NavMapRenderer(
         }
 
         if (geometry.size >= 2) {
-            val path = Path()
-            var started = false
-            for (p in geometry) {
-                val x = (lonToWorld(p.lng) * worldPx - originX).toFloat()
-                val y = (latToWorld(p.lat) * worldPx - originY).toFloat()
-                if (!started) { path.moveTo(x, y); started = true } else path.lineTo(x, y)
+            val levels = trafficLevels(trafficSpans, geometry.size)
+            var x0 = (lonToWorld(geometry[0].lng) * worldPx - originX).toFloat()
+            var y0 = (latToWorld(geometry[0].lat) * worldPx - originY).toFloat()
+            for (i in 1 until geometry.size) {
+                val x1 = (lonToWorld(geometry[i].lng) * worldPx - originX).toFloat()
+                val y1 = (latToWorld(geometry[i].lat) * worldPx - originY).toFloat()
+                routePaint.color = trafficColor(levels[i - 1])
+                canvas.drawLine(x0, y0, x1, y1, routePaint)
+                x0 = x1; y0 = y1
             }
-            canvas.drawPath(path, routePaint)
         }
         canvas.drawCircle(width / 2f, height / 2f, 7f, posFill)
         canvas.drawCircle(width / 2f, height / 2f, 10f, posRing)
@@ -101,6 +106,30 @@ class NavMapRenderer(
         out.reset()
         bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
         return out.toByteArray()
+    }
+
+    /** Per-geometry-index traffic level (0=free, 1=slow, 2=jam), expanded from [spans]. */
+    private fun trafficLevels(spans: List<TrafficSpan>, n: Int): IntArray {
+        val out = IntArray(n) // default 0 = free
+        if (spans.isEmpty()) return out
+        val sorted = spans.sortedBy { it.offset }
+        for (k in sorted.indices) {
+            val start = sorted[k].offset.coerceIn(0, n)
+            val end = (if (k + 1 < sorted.size) sorted[k + 1].offset else n).coerceIn(start, n)
+            val v = when (sorted[k].level) {
+                TrafficLevel.SLOW -> 1
+                TrafficLevel.JAM -> 2
+                else -> 0
+            }
+            for (i in start until end) out[i] = v
+        }
+        return out
+    }
+
+    private fun trafficColor(v: Int): Int = when (v) {
+        1 -> Color.rgb(255, 193, 7)     // slow — amber
+        2 -> Color.rgb(229, 57, 53)     // jam — red
+        else -> Color.rgb(52, 216, 200) // free — teal
     }
 
     /** Top maneuver card: turn arrow + distance + next road, like a real nav header. */
