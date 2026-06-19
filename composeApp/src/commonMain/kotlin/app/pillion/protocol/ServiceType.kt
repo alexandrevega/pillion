@@ -29,4 +29,12 @@ internal object ServiceType {
     const val ZOOM = 14
     const val ROAD = 3
     const val SPEED_LIMIT = 17
+    // turn-by-turn (rendered natively by the dash; see docs/PROTOCOL.md)
+    const val NEXT_TURN_DIST = 4
+    const val TBT_LIST = 5
+    const val ACTIVE_TURN = 6
+    const val NAV_INFO = 19
+    const val TBT_LIST_DATA = 97
+    /** start content update: payload 01 00 = nav image, 02 00 = TBT-only (pauses JPEG frames). */
+    const val CONTENT_UPDATE = 55
 }

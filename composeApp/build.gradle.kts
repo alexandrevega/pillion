@@ -7,6 +7,7 @@ plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.kotlinSerialization)
 }
 
 kotlin {
@@ -31,6 +32,12 @@ kotlin {
             implementation(libs.libadb.android)
             implementation(libs.bouncycastle.pkix)
             implementation(libs.conscrypt.android)
+            // ktor HTTP engine for Android (navigation routing providers).
+            implementation(libs.ktor.client.okhttp)
+        }
+        iosMain.dependencies {
+            // ktor HTTP engine for iOS (navigation routing providers).
+            implementation(libs.ktor.client.darwin)
         }
         commonMain.dependencies {
             implementation(compose.runtime)
@@ -41,6 +48,11 @@ kotlin {
             implementation(compose.components.resources)
             implementation(compose.components.uiToolingPreview)
             implementation(libs.kotlinx.coroutines.core)
+            // Navigation routing providers: HTTP client + JSON.
+            implementation(libs.ktor.client.core)
+            implementation(libs.ktor.client.content.negotiation)
+            implementation(libs.ktor.serialization.kotlinx.json)
+            implementation(libs.kotlinx.serialization.json)
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
