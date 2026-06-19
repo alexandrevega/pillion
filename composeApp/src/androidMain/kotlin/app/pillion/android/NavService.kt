@@ -185,7 +185,19 @@ class NavService : Service() {
                         nextRoad = step.roadName ?: "",
                     ),
                 )
-                if (renderer != null) channel.write(NaviLiteTbt.imageFrame(seq++, renderer.render(geometry, here)))
+                if (renderer != null) {
+                    channel.write(
+                        NaviLiteTbt.imageFrame(
+                            seq++,
+                            renderer.render(
+                                geometry, here,
+                                maneuverIcon = NaviLiteTbt.iconOf(step.maneuver),
+                                distanceMeters = prog.remainingMeters,
+                                roadName = step.roadName ?: "",
+                            ),
+                        ),
+                    )
+                }
                 Log.i(TAG, "here ${"%.5f".format(here.lat)},${"%.5f".format(here.lng)} -> " +
                     "active ${prog.activeIndex}/${steps.size} ${step.maneuver} in ${prog.remainingMeters}m")
                 return distAlong

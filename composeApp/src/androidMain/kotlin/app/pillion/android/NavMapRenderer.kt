@@ -41,13 +41,30 @@ class NavMapRenderer(
     private val posRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(52, 216, 200); style = Paint.Style.STROKE; strokeWidth = 3f
     }
+    private val cardBg = Paint().apply { color = Color.argb(0xE6, 13, 17, 23) }
+    private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(52, 216, 200); textSize = 40f; isFakeBoldText = true
+    }
+    private val distPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 28f; isFakeBoldText = true
+    }
+    private val roadPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(170, 182, 195); textSize = 17f
+    }
     private val tilePaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     private val canvas = Canvas(bitmap)
     private val out = ByteArrayOutputStream(32 * 1024)
 
-    /** Render centered on [pos] with the route on top; returns JPEG bytes. */
-    fun render(geometry: List<LatLng>, pos: LatLng, quality: Int = 75): ByteArray {
+    /** Render centered on [pos] with the route + a maneuver card on top; returns JPEG bytes. */
+    fun render(
+        geometry: List<LatLng>,
+        pos: LatLng,
+        maneuverIcon: Int = -1,
+        distanceMeters: Int = -1,
+        roadName: String = "",
+        quality: Int = 75,
+    ): ByteArray {
         val worldPx = (1 shl zoom) * TILE.toDouble()
         val originX = lonToWorld(pos.lng) * worldPx - width / 2.0
         val originY = latToWorld(pos.lat) * worldPx - height / 2.0
@@ -79,9 +96,37 @@ class NavMapRenderer(
         canvas.drawCircle(width / 2f, height / 2f, 7f, posFill)
         canvas.drawCircle(width / 2f, height / 2f, 10f, posRing)
 
+        if (maneuverIcon >= 0) drawCard(maneuverIcon, distanceMeters, roadName)
+
         out.reset()
         bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
         return out.toByteArray()
+    }
+
+    /** Top maneuver card: turn arrow + distance + next road, like a real nav header. */
+    private fun drawCard(icon: Int, distanceMeters: Int, road: String) {
+        canvas.drawRect(0f, 0f, width.toFloat(), 52f, cardBg)
+        canvas.drawText(arrowGlyph(icon), 12f, 38f, arrowPaint)
+        val dist = when {
+            distanceMeters < 0 -> ""
+            distanceMeters >= 1000 -> "%.1f km".format(distanceMeters / 1000.0)
+            else -> "$distanceMeters m"
+        }
+        canvas.drawText(dist, 62f, 26f, distPaint)
+        if (road.isNotBlank()) canvas.drawText(road.take(34), 62f, 45f, roadPaint)
+    }
+
+    private fun arrowGlyph(icon: Int): String = when (icon) {
+        34 -> "←"        // turn left  ←
+        35 -> "→"        // turn right →
+        6, 10 -> "↖"     // keep/exit left  ↖
+        7, 11 -> "↗"     // keep/exit right ↗
+        32 -> "↙"        // sharp left  ↙
+        33 -> "↘"        // sharp right ↘
+        36, 37 -> "↶"    // u-turn ↶
+        14 -> "↻"        // roundabout ↻
+        0, 1, 2 -> "◉"   // arrive ◉
+        else -> "↑"      // continue / straight ↑
     }
 
     private fun tile(x: Int, y: Int): Bitmap? {
