@@ -64,12 +64,15 @@ class NavService : Service() {
     private var liveGps = false
     private var origin: LatLng? = null
     private var dest = LatLng(52.3791, 4.9003)
+    // Dash target: a specific MAC (the desk emulator) or "" to find the bonded *CCU* by name (bike).
+    private var dashMac = "4C:03:4F:0A:DC:AE"
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         imageMode = intent?.getStringExtra("mode") != "tbt"
         liveGps = intent?.getBooleanExtra("live", false) == true
+        intent?.getStringExtra("dash")?.let { dashMac = it }
         intent?.let {
             if (it.hasExtra("dlat")) dest = LatLng(it.getDoubleExtra("dlat", dest.lat), it.getDoubleExtra("dlng", dest.lng))
             origin = if (it.hasExtra("olat")) LatLng(it.getDoubleExtra("olat", 0.0), it.getDoubleExtra("olng", 0.0)) else null
@@ -111,17 +114,23 @@ class NavService : Service() {
     @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT / ACCESS_FINE_LOCATION granted by the app
     private suspend fun navigate() {
         val adapter = BluetoothAdapter.getDefaultAdapter() ?: error("no Bluetooth adapter")
-        val dashDev = adapter.getRemoteDevice(DASH_MAC)
-        if (dashDev.bondState != BluetoothDevice.BOND_BONDED) {
-            dashDev.createBond()
-            var t = 0
-            while (dashDev.bondState != BluetoothDevice.BOND_BONDED && t++ < 40) delay(500)
-            check(dashDev.bondState == BluetoothDevice.BOND_BONDED) { "pairing failed" }
+        val channel: ByteChannel = if (dashMac.isNotBlank()) {
+            // Specific dash by MAC (desk emulator); pair if needed.
+            val dev = adapter.getRemoteDevice(dashMac)
+            if (dev.bondState != BluetoothDevice.BOND_BONDED) {
+                dev.createBond()
+                var t = 0
+                while (dev.bondState != BluetoothDevice.BOND_BONDED && t++ < 40) delay(500)
+                check(dev.bondState == BluetoothDevice.BOND_BONDED) { "pairing failed" }
+            }
+            runCatching { adapter.cancelDiscovery() }
+            val s = dev.createInsecureRfcommSocketToServiceRecord(SPP)
+            s.connect()
+            socketChannel(s)
+        } else {
+            // No MAC → connect to the bonded dash by name (*CCU*): the real bike CCU.
+            RfcommByteChannel().also { it.open() }
         }
-        runCatching { adapter.cancelDiscovery() }
-        val socket = dashDev.createInsecureRfcommSocketToServiceRecord(SPP)
-        socket.connect()
-        val channel = socketChannel(socket)
         try {
             val reader = FrameReader(channel)
             Handshake(channel, reader).perform()
@@ -156,7 +165,7 @@ class NavService : Service() {
             channel.write(NaviLiteTbt.contentUpdate(tbtOnly = !imageMode))
             for (frame in NaviLiteTbt.routeList(steps)) channel.write(frame)
 
-            val renderer = if (imageMode) NavMapRenderer() else null
+            val renderer = if (imageMode) NavMapRenderer(apiKey = key) else null
             val drain = if (imageMode) scope.launch { runCatching { while (isActive) reader.next() } } else null
             var seq = 0
             var lastActive = -1
@@ -253,8 +262,6 @@ class NavService : Service() {
         const val NOTI_ID = 42
         const val GPS = LocationManager.GPS_PROVIDER
         const val ARRIVE_THRESHOLD_M = 25.0
-        // Fedora dev-dash Bluetooth adapter (advertises as "YCCU-dev"). Change for another dash.
-        const val DASH_MAC = "4C:03:4F:0A:DC:AE"
         val SPP: UUID = UUID.fromString("00007220-0000-1000-8000-00805F9B34FB")
     }
 }
