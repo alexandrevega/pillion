@@ -1,7 +1,9 @@
 package app.pillion.server
 
+import android.annotation.SuppressLint
 import android.annotation.TargetApi
 import android.content.AttributionSource
+import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Bitmap
@@ -239,16 +241,58 @@ object DashServer {
     /** Move the foreground app onto the dash display and start encoding (phone just locked). */
     private fun promoteApp(component: String) {
         if (displayId < 0 || component.isEmpty()) return
-        exec(
-            "am", "start", "--display", displayId.toString(),
-            "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-n", component,
-        )
+        relocateApp(component, displayId)
         lastComponent = component
         capturing = true
         startHeartbeat()          // keep the device interactive so the dash group renders
         setMainDisplayPower(false) // turn the phone's own panel off (it stays awake → dash keeps rendering)
         startPanelOffRetries()
         Log.i(TAG, "promoted $component to display $displayId")
+    }
+
+    /**
+     * Put [component] on [target], **moving its existing task** rather than re-launching it.
+     * `am start --display` only relocates apps that allow a fresh instance; a singleTask/singleInstance
+     * app already running on display 0 (e.g. Google Maps mid-navigation) just gets refocused on display
+     * 0, so the dash display stays empty (black) while the app flashes on the phone on unlock — exactly
+     * the reported bug. Moving the root task (the `am display move-stack` primitive) relocates it
+     * regardless of launch mode. Fall back to a fresh launch only when the app isn't running yet.
+     */
+    private fun relocateApp(component: String, target: Int) {
+        val pkg = component.substringBefore('/')
+        val before = runCatching { taskAndDisplayForPackage(pkg) }
+            .onFailure { Log.w(TAG, "relocate: task lookup failed for $pkg: ${reason(it)}") }
+            .getOrNull()
+        if (before != null) {
+            val (taskId, fromDisplay) = before
+            val rc = exec("am", "display", "move-stack", taskId.toString(), target.toString())
+            // Re-query where the task actually ended up: move-stack returns rc=0 even when a
+            // singleInstance task refuses to move, so the landed display is the source of truth.
+            val landed = runCatching { taskAndDisplayForPackage(pkg)?.second }.getOrNull()
+            Log.i(TAG, "relocate: task $taskId ($pkg) display $fromDisplay -> $target (rc=$rc, landed=$landed)")
+        } else {
+            exec(
+                "am", "start", "--display", target.toString(),
+                "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-n", component,
+            )
+            Log.i(TAG, "relocate: launched $component on display $target (was not running)")
+        }
+    }
+
+    /** (rootTaskId, displayId) of [pkg]'s current task, or null if it isn't running. */
+    private fun taskAndDisplayForPackage(pkg: String): Pair<Int, Int>? {
+        val atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
+        val infos = atm.javaClass.getMethod("getAllRootTaskInfos").invoke(atm) as List<*>
+        for (info in infos) {
+            info ?: continue
+            val cls = info.javaClass
+            val top = runCatching { cls.getField("topActivity").get(info) as? ComponentName }.getOrNull()
+            val base = runCatching { cls.getField("baseActivity").get(info) as? ComponentName }.getOrNull()
+            if (top?.packageName == pkg || base?.packageName == pkg) {
+                return cls.getField("taskId").getInt(info) to cls.getField("displayId").getInt(info)
+            }
+        }
+        return null
     }
 
     /**
@@ -419,6 +463,59 @@ object DashServer {
         }
     }
 
+    /**
+     * com.android.server.display.DisplayControl, loaded + linked so its **native** getPhysicalDisplay*
+     * methods resolve from a bare app_process. Android 14+ moved those methods here from SurfaceControl.
+     *
+     * The naive approach — `Class.forName(...)` on the boot/app classloader + `System.loadLibrary` —
+     * fails with UnsatisfiedLinkError: RegisterNatives binds the JNI methods to whichever classloader
+     * loaded the *library*, which isn't the one that loaded DisplayControl. scrcpy's fix, replicated
+     * here: load DisplayControl through a classloader built from $SYSTEMSERVERCLASSPATH, then load the
+     * library via the private `Runtime.loadLibrary0(Class, String)` passing that same class — so the
+     * natives register against it. Computed once, then reused for every panel-power call.
+     */
+    private val displayControlClass: Class<*>? by lazy {
+        runCatching {
+            val factory = Class.forName("com.android.internal.os.ClassLoaderFactory")
+            val createClassLoader = factory.getDeclaredMethod(
+                "createClassLoader",
+                String::class.java, String::class.java, String::class.java, ClassLoader::class.java,
+                Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, String::class.java,
+            )
+            val systemServerClasspath = System.getenv("SYSTEMSERVERCLASSPATH")
+                ?: error("SYSTEMSERVERCLASSPATH unset")
+            val loader = createClassLoader.invoke(
+                null, systemServerClasspath, null, null, ClassLoader.getSystemClassLoader(), 0, true, null,
+            ) as ClassLoader
+            val dc = loader.loadClass("com.android.server.display.DisplayControl")
+            linkAndroidServers(dc)
+            Log.i(TAG, "panel: DisplayControl linked via SYSTEMSERVERCLASSPATH classloader")
+            dc
+        }.onFailure { Log.w(TAG, "panel: DisplayControl init failed: ${reason(it)}") }.getOrNull()
+    }
+
+    /**
+     * Load libandroid_servers and register its natives against [dc]'s classloader. lint flags
+     * `loadLibrary0` as a blocked non-SDK API for normal apps, but the helper runs as the **shell uid**
+     * (app_process), which is exempt from the hidden-API blacklist — same as scrcpy — so the reflection
+     * succeeds at runtime. Hence the suppression.
+     */
+    @SuppressLint("BlockedPrivateApi", "DiscouragedPrivateApi", "SoonBlockedPrivateApi", "PrivateApi")
+    private fun linkAndroidServers(dc: Class<*>) {
+        val rt = Runtime.getRuntime()
+        // loadLibrary0(Class, String) on API 34+; fall back to (ClassLoader, String) on older shapes.
+        val linked = runCatching {
+            Runtime::class.java.getDeclaredMethod("loadLibrary0", Class::class.java, String::class.java)
+                .apply { isAccessible = true }
+                .invoke(rt, dc, "android_servers")
+        }.recoverCatching {
+            Runtime::class.java.getDeclaredMethod("loadLibrary0", ClassLoader::class.java, String::class.java)
+                .apply { isAccessible = true }
+                .invoke(rt, dc.classLoader, "android_servers")
+        }
+        check(linked.isSuccess) { "loadLibrary0 failed: ${reason(linked.exceptionOrNull()!!)}" }
+    }
+
     /** IDisplayManager binder, for requestDisplayPower (Android 15+). */
     private val displayManagerService: Any? by lazy {
         runCatching {
@@ -447,17 +544,11 @@ object DashServer {
             val getToken = sc.getMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType)
             return getToken.invoke(null, ids.first()) as android.os.IBinder
         }.onFailure { Log.w(TAG, "panel: SurfaceControl physical token: ${reason(it)}") }
-        // 3) Android 14+: methods moved to com.android.server.display.DisplayControl. Its getPhysicalDisplay*
-        // methods are native (nativeGetPhysicalDisplayIds) implemented in libandroid_servers. The natives
-        // register against whichever DisplayControl class the *boot/app* classloader resolves, so we must
-        // load DisplayControl via the app classloader (the helper is spawned with services.jar on its
-        // CLASSPATH) — NOT a child PathClassLoader, or RegisterNatives won't match (UnsatisfiedLinkError).
+        // 3) Android 14+: methods moved to com.android.server.display.DisplayControl, whose native
+        // getPhysicalDisplay* methods only resolve when the class + libandroid_servers are loaded
+        // together via the SYSTEMSERVERCLASSPATH classloader (see [displayControlClass]).
         runCatching {
-            val loaded = runCatching { System.loadLibrary("android_servers") }
-                .recoverCatching { System.load("/system/lib64/libandroid_servers.so") }
-                .recoverCatching { System.load("/system/lib/libandroid_servers.so") }
-            Log.i(TAG, "panel: load libandroid_servers ${if (loaded.isSuccess) "OK" else "FAIL: ${loaded.exceptionOrNull()?.message}"}")
-            val dc = Class.forName("com.android.server.display.DisplayControl")
+            val dc = displayControlClass ?: error("DisplayControl unavailable")
             val ids = dc.getMethod("getPhysicalDisplayIds").apply { isAccessible = true }
                 .invoke(null) as LongArray
             val getToken = dc.getMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType)
@@ -490,12 +581,7 @@ object DashServer {
         wakeDisplay(0) // requestDisplayPower(ON) cannot restore a still-dozing power group by itself
         setMainDisplayPower(true) // restore the phone's panel
         latestJpeg = null
-        lastComponent?.let {
-            exec(
-                "am", "start", "--display", "0",
-                "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-n", it,
-            )
-        }
+        lastComponent?.let { relocateApp(it, 0) } // move the task back to the phone's own display
         Log.i(TAG, "demoted to phone")
     }
 
