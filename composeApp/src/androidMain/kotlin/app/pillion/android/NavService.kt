@@ -128,8 +128,10 @@ class NavService : Service() {
             s.connect()
             socketChannel(s)
         } else {
-            // No MAC → connect to the bonded dash by name (*CCU*): the real bike CCU.
-            RfcommByteChannel().also { it.open() }
+            // No MAC → try every bonded *CCU* dash, real bike (YCCU_…) before the -dev/-test
+            // emulators, and use the first that actually connects. (Several may be bonded from
+            // testing; firstOrNull would otherwise pick a powered-off emulator and fail.)
+            connectAnyDash(adapter)
         }
         try {
             val reader = FrameReader(channel)
@@ -257,6 +259,42 @@ class NavService : Service() {
             }
             lm.setTestProviderLocation(GPS, loc)
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun connectAnyDash(adapter: BluetoothAdapter): ByteChannel {
+        val candidates = adapter.bondedDevices
+            .filter { it.name?.contains("CCU", ignoreCase = true) == true }
+            // Real bike first: YCCU_<serial>. Emulators ("YCCU-dev"/"YCCU-test") last.
+            .sortedBy { d -> if (d.name.orEmpty().contains("-")) 1 else 0 }
+        check(candidates.isNotEmpty()) { "no bonded *CCU* dash — pair the bike's YCCU first" }
+        runCatching { adapter.cancelDiscovery() }
+        var lastErr: Exception? = null
+        for (dev in candidates) {
+            // Try several socket creators: insecure, secure (for AUTH-bonded dashes like the bike),
+            // then the reflection channel-1 fallback. Whichever connects wins.
+            val makers: List<Pair<String, () -> BluetoothSocket>> = listOf(
+                "insecure" to { dev.createInsecureRfcommSocketToServiceRecord(SPP) },
+                "secure" to { dev.createRfcommSocketToServiceRecord(SPP) },
+                "reflect-ch1" to {
+                    dev.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                        .invoke(dev, 1) as BluetoothSocket
+                },
+            )
+            for ((how, make) in makers) {
+                Log.i(TAG, "trying ${dev.name} (${dev.address}) via $how")
+                try {
+                    val s = make()
+                    s.connect()
+                    Log.i(TAG, "connected to ${dev.name} via $how")
+                    return socketChannel(s)
+                } catch (e: Exception) {
+                    Log.w(TAG, "  $how failed: ${e.message}")
+                    lastErr = e
+                }
+            }
+        }
+        throw lastErr ?: IllegalStateException("no dash connected")
     }
 
     private fun drainToImageAck(reader: FrameReader) {
