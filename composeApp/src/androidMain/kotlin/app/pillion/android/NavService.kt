@@ -64,8 +64,8 @@ class NavService : Service() {
     private var liveGps = false
     private var origin: LatLng? = null
     private var dest = LatLng(52.3791, 4.9003)
-    // Dash target: a specific MAC (the desk emulator) or "" to find the bonded *CCU* by name (bike).
-    private var dashMac = "4C:03:4F:0A:DC:AE"
+    // Dash target: "" = find the bonded *CCU* by name (the real bike). Pass a MAC for the emulator.
+    private var dashMac = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -166,7 +166,6 @@ class NavService : Service() {
             for (frame in NaviLiteTbt.routeList(steps)) channel.write(frame)
 
             val renderer = if (imageMode) NavMapRenderer(apiKey = key) else null
-            val drain = if (imageMode) scope.launch { runCatching { while (isActive) reader.next() } } else null
             var seq = 0
             var lastActive = -1
 
@@ -198,6 +197,7 @@ class NavService : Service() {
                             ),
                         ),
                     )
+                    drainToImageAck(reader) // wait for the dash to ack -> paces to the dash's max rate
                 }
                 Log.i(TAG, "here ${"%.5f".format(here.lat)},${"%.5f".format(here.lng)} -> " +
                     "active ${prog.activeIndex}/${steps.size} ${step.maneuver} in ${prog.remainingMeters}m")
@@ -212,18 +212,17 @@ class NavService : Service() {
                     if (distAlong >= total - ARRIVE_THRESHOLD_M) { Log.i(TAG, "arrived"); break }
                 }
             } else {
-                Log.i(TAG, "SIM guidance (mock fixes along the route)")
-                runCatching { setupMockGps(lm) }.onFailure { Log.w(TAG, "mock GPS off: ${it.message}") }
+                Log.i(TAG, "SIM guidance (dash-paced)")
                 var along = 0.0
+                var lastT = System.currentTimeMillis()
                 while (along <= total && scope.isActive) {
-                    val here = Guidance.pointAt(geometry, cum, along)
-                    pushFix(lm, here)
-                    emit(here)
-                    delay(1000)
-                    along += 14.0
+                    emit(Guidance.pointAt(geometry, cum, along))
+                    if (renderer == null) delay(250)
+                    val now = System.currentTimeMillis()
+                    along += SIM_SPEED_MPS * ((now - lastT).coerceIn(1L, 1000L)) / 1000.0
+                    lastT = now
                 }
             }
-            drain?.cancel()
             Log.i(TAG, "navigation complete")
             delay(1000)
         } finally {
@@ -260,6 +259,11 @@ class NavService : Service() {
         }
     }
 
+    private fun drainToImageAck(reader: FrameReader) {
+        var f = reader.next()
+        while (f.serviceType != app.pillion.protocol.ServiceType.IMAGE_ACK) f = reader.next()
+    }
+
     private fun socketChannel(socket: BluetoothSocket): ByteChannel = object : ByteChannel {
         private val inp = socket.inputStream
         private val out = socket.outputStream
@@ -275,6 +279,7 @@ class NavService : Service() {
         const val NOTI_ID = 42
         const val GPS = LocationManager.GPS_PROVIDER
         const val ARRIVE_THRESHOLD_M = 25.0
+        const val SIM_SPEED_MPS = 14.0
         val SPP: UUID = UUID.fromString("00007220-0000-1000-8000-00805F9B34FB")
     }
 }

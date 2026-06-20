@@ -28,8 +28,8 @@ class NavMapRenderer(
     private val apiKey: String,
     private val width: Int = 480,
     private val height: Int = 240,
-    private val zoom: Int = 16,
-    private val style: String = "explore.night",
+    private val zoom: Int = 17, // tighter nav zoom: fewer features in view -> smaller JPEGs
+    private val style: String = "lite.night", // lighter style = far smaller JPEGs for fluid streaming
 ) {
     private val tileCache = LruCache<String, Bitmap>(64)
     private val routePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -66,7 +66,7 @@ class NavMapRenderer(
         distanceMeters: Int = -1,
         roadName: String = "",
         trafficSpans: List<TrafficSpan> = emptyList(),
-        quality: Int = 75,
+        quality: Int = 32,
     ): ByteArray {
         val worldPx = (1 shl zoom) * TILE.toDouble()
         val originX = lonToWorld(pos.lng) * worldPx - width / 2.0
