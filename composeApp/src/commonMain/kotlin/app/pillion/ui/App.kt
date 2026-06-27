@@ -38,7 +38,7 @@ fun App(
     PillionTheme(themeMode) {
         val state by controller.state.collectAsState()
         var quality by rememberSaveable { mutableStateOf(40) }
-        var maxFps by rememberSaveable { mutableStateOf(15) }
+        var maxFps by rememberSaveable { mutableStateOf(25) }
         var showSettings by rememberSaveable { mutableStateOf(false) }
         var showDashOnboarding by rememberSaveable { mutableStateOf(false) }
         var dashEnabled by remember { mutableStateOf(settingsStore?.dashEnabled() ?: false) }

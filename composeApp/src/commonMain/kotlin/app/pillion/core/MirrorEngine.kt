@@ -8,6 +8,8 @@ import kotlin.concurrent.Volatile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -67,57 +69,78 @@ class MirrorEngine(
         _state.value = MirrorState.Idle
     }
 
-    private fun streamLoop(reader: FrameReader) {
-        var frames = 0
-        var acks = 0
-        var waitedForFrame = false
-        var windowStart = nowMs()
-        var lastSend = 0L
-        var sendMsTotal = 0L
-        var sendMsMax = 0L
-        var ackMsTotal = 0L
-        var ackMsMax = 0L
-        while (running) {
-            val jpeg = screen.latestFrame()
-            if (jpeg == null) {
-                if (!waitedForFrame) { Logger.d("session: waiting for first screen frame"); waitedForFrame = true }
-                sleepMs(15)
-                continue
+    private suspend fun streamLoop(reader: FrameReader) {
+        // CONFLATED: producer always overwrites with the latest frame; consumer never stalls
+        // waiting for capture/encode while the ACK round-trip is in flight.
+        val frameChannel = Channel<ByteArray>(Channel.CONFLATED)
+        coroutineScope {
+            // Producer: captures and encodes frames independently of ACK latency.
+            launch {
+                try {
+                    var lastCapture = 0L
+                    var waitedForFrame = false
+                    while (running) {
+                        val jpeg = screen.latestFrame()
+                        if (jpeg == null) {
+                            if (!waitedForFrame) {
+                                Logger.d("session: waiting for first screen frame")
+                                waitedForFrame = true
+                            }
+                            sleepMs(15)
+                            continue
+                        }
+                        if (minIntervalMs > 0L) {
+                            val wait = minIntervalMs - (nowMs() - lastCapture)
+                            if (wait > 0L) sleepMs(wait)
+                        }
+                        lastCapture = nowMs()
+                        frameChannel.trySend(jpeg)
+                    }
+                } finally {
+                    frameChannel.close()
+                }
             }
-            if (minIntervalMs > 0L) {
-                val wait = minIntervalMs - (nowMs() - lastSend)
-                if (wait > 0L) sleepMs(wait)
-            }
-            lastSend = nowMs()
-            val sendStart = nowMs()
-            sendImage(jpeg)
-            val sendMs = nowMs() - sendStart
-            sendMsTotal += sendMs
-            if (sendMs > sendMsMax) sendMsMax = sendMs
-            if (seq == 2) Logger.d("session: first image sent (${jpeg.size} bytes)")
-            val ackStart = nowMs()
-            if (awaitAck(reader)) acks++
-            val ackMs = nowMs() - ackStart
-            ackMsTotal += ackMs
-            if (ackMs > ackMsMax) ackMsMax = ackMs
-            frames++
-            val elapsed = nowMs() - windowStart
-            if (elapsed >= 1000) {
-                val avgSendMs = if (frames > 0) sendMsTotal / frames else 0L
-                val avgAckMs = if (frames > 0) ackMsTotal / frames else 0L
-                Logger.d(
-                    "session: ${frames} frames, ${acks} acks, ${jpeg.size / 1024} KB/frame, " +
-                        "send ${avgSendMs}ms avg/${sendMsMax}ms max, " +
-                        "ack ${avgAckMs}ms avg/${ackMsMax}ms max",
-                )
-                _state.value = MirrorState.Streaming(frames * 1000.0 / elapsed, jpeg.size / 1024)
-                frames = 0
-                acks = 0
-                sendMsTotal = 0L
-                sendMsMax = 0L
-                ackMsTotal = 0L
-                ackMsMax = 0L
-                windowStart = nowMs()
+            // Consumer: sends the latest buffered frame then awaits ACK.
+            launch {
+                var frames = 0
+                var acks = 0
+                var windowStart = nowMs()
+                var sendMsTotal = 0L
+                var sendMsMax = 0L
+                var ackMsTotal = 0L
+                var ackMsMax = 0L
+                for (jpeg in frameChannel) {
+                    val sendStart = nowMs()
+                    sendImage(jpeg)
+                    val sendMs = nowMs() - sendStart
+                    sendMsTotal += sendMs
+                    if (sendMs > sendMsMax) sendMsMax = sendMs
+                    if (seq == 2) Logger.d("session: first image sent (${jpeg.size} bytes)")
+                    val ackStart = nowMs()
+                    if (awaitAck(reader)) acks++
+                    val ackMs = nowMs() - ackStart
+                    ackMsTotal += ackMs
+                    if (ackMs > ackMsMax) ackMsMax = ackMs
+                    frames++
+                    val elapsed = nowMs() - windowStart
+                    if (elapsed >= 1000) {
+                        val avgSendMs = if (frames > 0) sendMsTotal / frames else 0L
+                        val avgAckMs = if (frames > 0) ackMsTotal / frames else 0L
+                        Logger.d(
+                            "session: ${frames} frames, ${acks} acks, ${jpeg.size / 1024} KB/frame, " +
+                                "send ${avgSendMs}ms avg/${sendMsMax}ms max, " +
+                                "ack ${avgAckMs}ms avg/${ackMsMax}ms max",
+                        )
+                        _state.value = MirrorState.Streaming(frames * 1000.0 / elapsed, jpeg.size / 1024)
+                        frames = 0
+                        acks = 0
+                        sendMsTotal = 0L
+                        sendMsMax = 0L
+                        ackMsTotal = 0L
+                        ackMsMax = 0L
+                        windowStart = nowMs()
+                    }
+                }
             }
         }
     }
