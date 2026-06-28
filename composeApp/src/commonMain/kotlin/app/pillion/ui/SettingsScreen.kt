@@ -188,10 +188,10 @@ internal fun SettingsScreen(
         SettingsGroup {
             SettingSlider("Image quality", "$quality", quality.toFloat(), 10f, 80f) { onQuality(it.roundToInt()) }
             GroupDivider()
-            SettingSlider("Max frame rate", "$maxFps fps", maxFps.toFloat(), 5f, 15f) { onMaxFps(it.roundToInt()) }
+            SettingSlider("Max frame rate", "$maxFps fps", maxFps.toFloat(), 5f, 30f) { onMaxFps(it.roundToInt()) }
         }
         Text(
-            "Higher quality looks sharper but makes the picture less smooth (about 14–15 fps at 40% " +
+            "Higher quality looks sharper but makes the picture less smooth (about 15–25 fps at 40% " +
                 "on a fast phone). The cap keeps the frame rate down to save battery and reduce heat.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

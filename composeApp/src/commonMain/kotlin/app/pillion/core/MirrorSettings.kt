@@ -9,6 +9,6 @@ package app.pillion.core
  */
 data class MirrorSettings(
     val quality: Int = 40,
-    val maxFps: Int = 15,
+    val maxFps: Int = 25,
     val dashResolution: DashResolution = DashResolution.DEFAULT,
 )
