@@ -12,6 +12,10 @@ libadb = "3.1.1"
 # to avoid duplicate classes; we add bcpkix (cert builder) from the same line.
 bouncycastle = "1.81"
 conscrypt = "2.5.3"
+# SmartDeviceLink Android — SDL "Path B" (USB/AOA full-motion H.264). Same version sdlprobe proved.
+sdl = "5.8.0"
+# Code coverage for the shared Kotlin (commonTest) — compatible with Kotlin 2.1.0.
+kover = "0.9.1"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activityCompose" }
@@ -20,9 +24,11 @@ kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-c
 libadb-android = { module = "com.github.MuntashirAkon:libadb-android", version.ref = "libadb" }
 bouncycastle-pkix = { module = "org.bouncycastle:bcpkix-jdk15to18", version.ref = "bouncycastle" }
 conscrypt-android = { module = "org.conscrypt:conscrypt-android", version.ref = "conscrypt" }
+smartdevicelink-android = { module = "com.smartdevicelink:sdl_android", version.ref = "sdl" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }
 composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "compose-multiplatform" }
 composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kover = { id = "org.jetbrains.kotlinx.kover", version.ref = "kover" }

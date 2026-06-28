@@ -6,17 +6,35 @@ import ComposeApp
 /// - the Pillion "Start mirroring" button → triggers the system broadcast picker,
 /// - the extension's broadcast start/stop Darwin notifications → the shared `MirrorState`.
 final class BroadcastBridge: ObservableObject {
-    let controller: BroadcastMirrorController
+    let controller: BroadcastMirrorController        // NaviLite (Bluetooth / MFi via ReplayKit)
+    let sdlController: SdlBroadcastController         // SDL (USB / iAP2)
+    private let sdlSession: SdlSession
     private weak var picker: RPSystemBroadcastPickerView?
 
     init() {
         controller = BroadcastMirrorController()
+        sdlController = SdlBroadcastController()
+        // Build the SDL session first, then connect the Kotlin controller's state in (the closure has to
+        // be assigned after sdlController exists), and route start/stop from the UI down to the session.
+        let sdlController = self.sdlController
+        sdlSession = SdlSession(onState: { state in
+            DispatchQueue.main.async {
+                switch state {
+                case .idle: sdlController.setIdle()
+                case .connecting: sdlController.setConnecting()
+                case .streaming: sdlController.setStreaming()
+                case .error(let message): sdlController.setError(message: message)
+                }
+            }
+        })
         controller.onToggle = { [weak self] in self?.triggerPicker() }
+        self.sdlController.onStart = { [weak self] in self?.sdlSession.start() }
+        self.sdlController.onStop = { [weak self] in self?.sdlSession.stop() }
         observeBroadcastState()
     }
 
     func makeViewController() -> UIViewController {
-        MainViewControllerKt.MainViewController(controller: controller)
+        MainViewControllerKt.MainViewController(naviliteController: controller, sdlController: sdlController)
     }
 
     /// Called by `BroadcastPickerHost` once the (hidden) picker view exists.

@@ -9,6 +9,10 @@ settings:
     SWIFT_VERSION: "5.0"
     TARGETED_DEVICE_FAMILY: "1,2"
     CODE_SIGN_STYLE: Automatic
+packages:
+  SmartDeviceLink:
+    url: https://github.com/smartdevicelink/sdl_ios
+    from: "7.6.1"
 targets:
   iosApp:
     type: application
@@ -21,13 +25,15 @@ targets:
     dependencies:
       - target: PillionBroadcast
         embed: true
+      - package: SmartDeviceLink
+        product: SmartDeviceLink
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.pillion.dev
         INFOPLIST_FILE: iosApp/Info.plist
         # Gradle's build phase writes outside DerivedData, so the sandbox must be off (Xcode 15+).
         ENABLE_USER_SCRIPT_SANDBOXING: NO
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Find + link the static Kotlin/Native framework produced by the build phase below.
         FRAMEWORK_SEARCH_PATHS:
           - "$(inherited)"

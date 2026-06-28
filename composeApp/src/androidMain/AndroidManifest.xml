@@ -4,6 +4,8 @@
 
     <!-- Network: only used for the in-app update check against GitHub Releases -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Required by the SDL router service (its integration validator aborts without it). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Wireless-debugging setup: keep mDNS visible while discovering adb's pairing port. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
@@ -21,10 +23,22 @@
     <uses-permission android:name="android.permission.SUBSCRIBE_TO_KEYGUARD_LOCKED_STATE"
         tools:ignore="ProtectedPermissions" />
 
-    <!-- Bluetooth: connect to the already-bonded dash (no scanning needed) -->
-    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <!-- Bluetooth: connect to the already-bonded dash (no scanning needed).
+         NOTE: BLUETOOTH has NO maxSdkVersion — SDL's IntegrationValidator requires it unconditionally
+         (even on API 31+), or the SdlRouterService crashes on the USB path. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- SDL "Path B": the Yamaha CCU connects as a USB accessory; high-bandwidth video needs this. -->
+    <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
+    <!-- Android 11+ package visibility: SDL's RouterServiceValidator does queryIntentServices() for
+         the router action; without this it returns empty -> registration validation fails. -->
+    <queries>
+        <intent>
+            <action android:name="com.smartdevicelink.router.service" />
+        </intent>
+    </queries>
 
     <!-- Foreground service hosting MediaProjection screen capture -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -35,6 +49,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
+        android:name="app.pillion.android.PillionApp"
         android:label="Pillion"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -65,5 +80,53 @@
             android:name="app.pillion.android.CaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection|connectedDevice" />
+
+        <!-- SDL "Path B" (USB full-motion). The SDL session. -->
+        <service
+            android:name="app.pillion.android.sdl.SdlService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|mediaProjection" />
+
+        <!-- SDL multiplex router. MUST run in the dedicated process or SDL self-destructs
+             ("Not using correct process. Shutting down") and the USB handoff hangs. -->
+        <service
+            android:name="app.pillion.android.sdl.SdlRouterService"
+            android:exported="true"
+            android:foregroundServiceType="connectedDevice"
+            android:process="com.smartdevicelink.router"
+            tools:node="merge">
+            <intent-filter>
+                <action android:name="com.smartdevicelink.router.service" />
+            </intent-filter>
+            <meta-data
+                android:name="sdl_router_version"
+                android:value="@integer/sdl_router_service_version_value" />
+        </service>
+
+        <!-- Wakes the app when the head unit connects (USB attach / router start). -->
+        <receiver
+            android:name="app.pillion.android.sdl.SdlReceiver"
+            android:exported="true"
+            tools:ignore="ExportedReceiver">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="sdl.router.startservice" />
+            </intent-filter>
+        </receiver>
+
+        <!-- SDL library activity that receives USB_ACCESSORY_ATTACHED and hands the accessory to the
+             router. The accessory_filter must match the CCU's advertised manufacturer/model. -->
+        <activity
+            android:name="com.smartdevicelink.transport.USBAccessoryAttachmentActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
+                android:resource="@xml/accessory_filter" />
+        </activity>
     </application>
 </manifest>

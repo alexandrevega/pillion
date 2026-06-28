@@ -30,9 +30,16 @@ class AndroidSettingsStore(context: Context) : SettingsStore {
         prefs.edit().putString(KEY_DASH_RESOLUTION, resolution.name).apply()
     }
 
+    override fun selectedBikeId(): String? = prefs.getString(KEY_BIKE, null)
+
+    override fun setSelectedBikeId(id: String) {
+        prefs.edit().putString(KEY_BIKE, id).apply()
+    }
+
     private companion object {
         const val KEY_THEME = "theme_mode"
         const val KEY_DASH_ENABLED = "dash_enabled"
         const val KEY_DASH_RESOLUTION = "dash_resolution"
+        const val KEY_BIKE = "selected_bike_id"
     }
 }

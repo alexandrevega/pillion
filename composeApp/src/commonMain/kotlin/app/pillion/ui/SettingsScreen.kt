@@ -75,6 +75,8 @@ internal fun SettingsScreen(
     onDashResolution: (DashResolution) -> Unit = {},
     onSetUpDash: () -> Unit = {},
     onDisableDash: () -> Unit = {},
+    bikeName: String = "",
+    onChangeBike: () -> Unit = {},
     update: UpdateInfo?,
     onBack: () -> Unit,
 ) {
@@ -158,6 +160,30 @@ internal fun SettingsScreen(
         }
 
         Spacer(Modifier.height(24.dp))
+        SectionHeader("Motorcycle")
+        SettingsGroup {
+            Row(
+                Modifier.fillMaxWidth().clickable(onClick = onChangeBike).padding(vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(bikeName.ifEmpty { "Not selected" }, style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Tap to switch head unit",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    "Change",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
         SectionHeader("Mirroring")
         SettingsGroup {
             SettingSlider("Image quality", "$quality", quality.toFloat(), 10f, 80f) { onQuality(it.roundToInt()) }
@@ -165,8 +191,8 @@ internal fun SettingsScreen(
             SettingSlider("Max frame rate", "$maxFps fps", maxFps.toFloat(), 5f, 15f) { onMaxFps(it.roundToInt()) }
         }
         Text(
-            "Higher quality is sharper but lowers the frame rate your phone can push " +
-                "(≈14–15 fps at 40% on a fast phone). The cap limits frames to save battery and heat.",
+            "Higher quality looks sharper but makes the picture less smooth (about 14–15 fps at 40% " +
+                "on a fast phone). The cap keeps the frame rate down to save battery and reduce heat.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(start = 6.dp, top = 8.dp, end = 6.dp),
@@ -296,7 +322,7 @@ private fun DashResolutionSelector(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text("Virtual display size", style = MaterialTheme.typography.bodyLarge)
+            Text("Map layout size", style = MaterialTheme.typography.bodyLarge)
             Text(
                 "${selected.label} - ${resolutionDetail(selected)}",
                 style = MaterialTheme.typography.bodySmall,
@@ -314,11 +340,12 @@ private fun DashResolutionSelector(
     if (choosing) {
         AlertDialog(
             onDismissRequest = { choosing = false },
-            title = { Text("Virtual display size") },
+            title = { Text("Map layout size") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
-                        "Used for Waze and Maps layout. Frames still output to the dash at 480 x 240.",
+                        "Controls how much of the map fits on the dash. The dash always receives a " +
+                            "480 × 240 image — a larger layout just shows more at once.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(bottom = 8.dp),
@@ -385,10 +412,10 @@ private fun resolutionDetail(option: DashResolution): String {
     val tenths = option.width * 10 / DashResolution.Native.width
     val scale = if (tenths % 10 == 0) "${tenths / 10}x" else "${tenths / 10}.${tenths % 10}x"
     return when (option) {
-        DashResolution.Native -> "Native panel size"
-        DashResolution.Balanced -> "$scale render scale, default"
-        DashResolution.R1920 -> "$scale render scale, highest CPU"
-        else -> "$scale render scale"
+        DashResolution.Native -> "Matches the dash panel"
+        DashResolution.Balanced -> "Recommended"
+        DashResolution.R1920 -> "Most detail · heaviest on battery"
+        else -> "$scale · more detail"
     }
 }
 

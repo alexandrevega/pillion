@@ -105,7 +105,8 @@ purposes. Commercial use requires a separate license. This is a hobby / interope
 ## Legal / disclaimer
 
 - Independent interoperability project. **Not affiliated with Yamaha or Garmin.** "Yamaha", "Garmin",
-  and "StreetCross" are trademarks of their respective owners, used here only descriptively.
+  "StreetCross", and "Motorize" are trademarks of their respective owners, used here only descriptively;
+  Pillion is not endorsed by or sponsored by them.
 - Contains **no** Garmin/Yamaha code or binaries — only an original, independent implementation of an
   observed protocol and original documentation of it.
 - Provided **as-is, with no warranty.** Use at your own risk; you are responsible for safe and lawful

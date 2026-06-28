@@ -18,24 +18,41 @@ import app.pillion.core.SettingsStore
 import app.pillion.core.ThemeMode
 import app.pillion.core.UpdateChecker
 import app.pillion.core.UpdateInfo
+import app.pillion.core.headunit.HeadUnitProfile
+import app.pillion.core.headunit.HeadUnitRegistry
 
 /** The public GitHub repository — shown in-app so anyone can read the source. */
 const val REPO_URL = "https://github.com/alexandrevega/pillion"
 
 /**
- * App entry point: owns the top-level UI state and routes between the Home and Settings screens,
- * gating the experimental and update dialogs. Screen content lives in the [HomeScreen] /
- * [SettingsScreen] composables; this stays a thin orchestrator.
+ * App entry point: owns the top-level UI state and routes between bike-selection (first run), Home and
+ * Settings. The controller is resolved per selected [HeadUnitProfile] via [controllerFor] (DIP), so the
+ * shared UI never knows whether it's driving NaviLite (Bluetooth) or SDL (USB).
  */
 @Composable
 fun App(
-    controller: MirrorController,
+    controllerFor: (HeadUnitProfile) -> MirrorController,
     updateChecker: UpdateChecker? = null,
     settingsStore: SettingsStore? = null,
     dashSetup: DashSetup? = null,
 ) {
     var themeMode by remember { mutableStateOf(settingsStore?.themeMode() ?: ThemeMode.SYSTEM) }
     PillionTheme(themeMode) {
+        var selectedBikeId by remember { mutableStateOf(settingsStore?.selectedBikeId()) }
+        var changingBike by remember { mutableStateOf(false) }
+        val profile = selectedBikeId?.let { HeadUnitRegistry.byId(it) }
+
+        // First run shows the full onboarding; "Change bike" (from Settings) jumps to the picker.
+        if (profile == null) {
+            OnboardingScreen(
+                profiles = HeadUnitRegistry.all(),
+                onSelect = { p -> settingsStore?.setSelectedBikeId(p.id); selectedBikeId = p.id; changingBike = false },
+                skipIntro = changingBike,
+            )
+            return@PillionTheme
+        }
+
+        val controller = remember(profile.id) { controllerFor(profile) }
         val state by controller.state.collectAsState()
         var quality by rememberSaveable { mutableStateOf(40) }
         var maxFps by rememberSaveable { mutableStateOf(15) }
@@ -81,6 +98,8 @@ fun App(
                 },
                 onSetUpDash = { showDashOnboarding = true },
                 onDisableDash = { dashEnabled = false; settingsStore?.setDashEnabled(false) },
+                bikeName = profile.displayName,
+                onChangeBike = { showSettings = false; changingBike = true; selectedBikeId = null },
                 update = update,
                 onBack = { showSettings = false },
             )

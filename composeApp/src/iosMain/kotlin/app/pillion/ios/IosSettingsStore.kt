@@ -32,9 +32,16 @@ class IosSettingsStore : SettingsStore {
         defaults.setObject(resolution.name, forKey = DASH_RES_KEY)
     }
 
+    override fun selectedBikeId(): String? = defaults.stringForKey(BIKE_KEY)
+
+    override fun setSelectedBikeId(id: String) {
+        defaults.setObject(id, forKey = BIKE_KEY)
+    }
+
     private companion object {
         const val THEME_KEY = "theme_mode"
         const val DASH_ENABLED_KEY = "dash_enabled"
         const val DASH_RES_KEY = "dash_resolution"
+        const val BIKE_KEY = "selected_bike_id"
     }
 }

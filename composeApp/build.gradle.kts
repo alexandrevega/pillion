@@ -7,6 +7,7 @@ plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.kover)
 }
 
 kotlin {
@@ -31,6 +32,8 @@ kotlin {
             implementation(libs.libadb.android)
             implementation(libs.bouncycastle.pkix)
             implementation(libs.conscrypt.android)
+            // SDL "Path B": USB/AOA full-motion H.264 to USB head units (Tracer etc.).
+            implementation(libs.smartdevicelink.android)
         }
         commonMain.dependencies {
             implementation(compose.runtime)
@@ -51,6 +54,27 @@ kotlin {
 compose.resources {
     publicResClass = true
     packageOfResClass = "app.pillion.resources"
+}
+
+// Code coverage focuses on the unit-testable shared domain (protocol codec, head-unit profiles/registry,
+// SemVer, controllers). Compose UI, Android-framework services and generated code are excluded because
+// they require an instrumented device, not JVM unit tests — leaving them in would mask real coverage.
+kover {
+    reports {
+        filters {
+            excludes {
+                classes(
+                    "app.pillion.ui.*",          // Compose screens
+                    "app.pillion.android.*",     // Android services / framework glue
+                    "app.pillion.server.*",      // Ktor dash server (device-bound)
+                    "app.pillion.resources.*",   // generated resource accessors
+                    "*ComposableSingletons*",
+                    "*ComposeApp*",
+                )
+                annotatedBy("androidx.compose.runtime.Composable")
+            }
+        }
+    }
 }
 
 // Release signing is read from a gitignored keystore.properties (local only). When it's absent
@@ -78,6 +102,13 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+    testOptions {
+        unitTests {
+            // Stub android.util.Log etc. in JVM unit tests (the shared Logger maps to android.util.Log
+            // on this target) so commonTest can exercise logging code paths without an emulator.
+            isReturnDefaultValues = true
         }
     }
     signingConfigs {

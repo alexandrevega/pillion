@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  USB-accessory identities the Yamaha CCU advertises (matching Garmin Motorize's accessory_filter).
+  Android only fires USB_ACCESSORY_ATTACHED if one of these matches, so these exact strings are what
+  let SDL wake on plug-in.
+-->
+<resources>
+    <usb-accessory manufacturer="Yamaha-LinkBox" model="Core" version="1.0" />
+    <usb-accessory manufacturer="Communication Control Unit" model="Core" version="1.0" />
+    <usb-accessory manufacturer="Communication Control Unit" model="Core" version="2.0" />
+</resources>
