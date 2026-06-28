@@ -38,10 +38,17 @@ class IosSettingsStore : SettingsStore {
         defaults.setObject(id, forKey = BIKE_KEY)
     }
 
+    override fun compatMode(): Boolean = defaults.boolForKey(COMPAT_KEY)
+
+    override fun setCompatMode(enabled: Boolean) {
+        defaults.setBool(enabled, forKey = COMPAT_KEY)
+    }
+
     private companion object {
         const val THEME_KEY = "theme_mode"
         const val DASH_ENABLED_KEY = "dash_enabled"
         const val DASH_RES_KEY = "dash_resolution"
         const val BIKE_KEY = "selected_bike_id"
+        const val COMPAT_KEY = "compat_mode"
     }
 }

@@ -36,6 +36,7 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -67,6 +68,8 @@ internal fun SettingsScreen(
     onQuality: (Int) -> Unit,
     maxFps: Int,
     onMaxFps: (Int) -> Unit,
+    compatMode: Boolean = false,
+    onCompatMode: (Boolean) -> Unit = {},
     themeMode: ThemeMode,
     onThemeMode: (ThemeMode) -> Unit,
     dashSupported: Boolean = false,
@@ -189,6 +192,22 @@ internal fun SettingsScreen(
             SettingSlider("Image quality", "$quality", quality.toFloat(), 10f, 80f) { onQuality(it.roundToInt()) }
             GroupDivider()
             SettingSlider("Max frame rate", "$maxFps fps", maxFps.toFloat(), 5f, 30f) { onMaxFps(it.roundToInt()) }
+            GroupDivider()
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Compatibility mode", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Sends one frame at a time. Turn on if the dash stutters, freezes, or drops out.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(checked = compatMode, onCheckedChange = onCompatMode)
+            }
         }
         Text(
             "Higher quality looks sharper but makes the picture less smooth (about 15–25 fps at 40% " +

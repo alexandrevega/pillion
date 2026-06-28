@@ -36,10 +36,17 @@ class AndroidSettingsStore(context: Context) : SettingsStore {
         prefs.edit().putString(KEY_BIKE, id).apply()
     }
 
+    override fun compatMode(): Boolean = prefs.getBoolean(KEY_COMPAT, false)
+
+    override fun setCompatMode(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_COMPAT, enabled).apply()
+    }
+
     private companion object {
         const val KEY_THEME = "theme_mode"
         const val KEY_DASH_ENABLED = "dash_enabled"
         const val KEY_DASH_RESOLUTION = "dash_resolution"
         const val KEY_BIKE = "selected_bike_id"
+        const val KEY_COMPAT = "compat_mode"
     }
 }

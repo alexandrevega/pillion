@@ -44,6 +44,7 @@ class CaptureService : Service() {
     private var engine: MirrorEngine? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var dashEnabled = false
+    private var maxInFlight = 2 // 1 = compatibility mode (stop-and-wait); 2 = pipelined (default)
     private var dashSwitch: SwitchableScreenSource? = null
     private var screenReceiver: BroadcastReceiver? = null
     private var keyguardManager: KeyguardManager? = null
@@ -63,6 +64,7 @@ class CaptureService : Service() {
         val maxFps = intent?.getIntExtra(EXTRA_MAX_FPS, 15) ?: 15
         val dashResolution = dashResolutionFrom(intent)
         dashEnabled = intent?.getBooleanExtra(EXTRA_DASH_ENABLED, false) ?: false
+        maxInFlight = if (intent?.getBooleanExtra(EXTRA_COMPAT, false) == true) 1 else 2
         startSession(quality, maxFps, dashResolution)
         return START_NOT_STICKY
     }
@@ -333,7 +335,7 @@ class CaptureService : Service() {
     }
 
     private fun runEngine(screen: ScreenSource, maxFps: Int) {
-        val mirror = MirrorEngine(RfcommByteChannel(), screen, maxFps)
+        val mirror = MirrorEngine(RfcommByteChannel(), screen, maxFps, maxInFlight = maxInFlight)
         engine = mirror
         scope.launch {
             mirror.state.collect { state ->
@@ -454,6 +456,8 @@ class CaptureService : Service() {
         const val EXTRA_DASH_ENABLED = "dashEnabled"
         const val EXTRA_DASH_WIDTH = "dashWidth"
         const val EXTRA_DASH_HEIGHT = "dashHeight"
+        /** When true, stream one frame at a time (stop-and-wait) instead of the 2-in-flight pipeline. */
+        const val EXTRA_COMPAT = "compatMode"
 
         // Handed over by the Activity after the user grants screen capture.
         @Volatile var resultCode: Int = 0

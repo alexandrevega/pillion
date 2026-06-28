@@ -20,4 +20,7 @@ interface SettingsStore {
      *  or null if they haven't chosen yet (→ show the bike-selection screen). */
     fun selectedBikeId(): String?
     fun setSelectedBikeId(id: String)
+
+    fun compatMode(): Boolean
+    fun setCompatMode(enabled: Boolean)
 }
