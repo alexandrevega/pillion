@@ -22,6 +22,11 @@ targets:
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig
+    entitlements:
+      path: iosApp/iosApp.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.app.pillion
     dependencies:
       - target: PillionBroadcast
         embed: true
@@ -97,6 +102,11 @@ targets:
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig
+    entitlements:
+      path: Extension/PillionBroadcast.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.app.pillion
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.pillion.dev.broadcast

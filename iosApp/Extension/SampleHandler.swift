@@ -4,6 +4,7 @@ import CoreImage
 import CoreMedia
 import ImageIO
 import ExternalAccessory
+import Metal
 
 /// Darwin notification names the app observes to reflect broadcast state (no App Group needed).
 enum BroadcastSignal {
@@ -21,16 +22,33 @@ enum BroadcastSignal {
 /// from rickdash-ios; picks the bike (External Accessory) when present, else the dev emulator (TCP).
 class SampleHandler: RPBroadcastSampleHandler {
     private var conn: DashConn!
-    private let ci = CIContext(options: [.cacheIntermediates: false])
+    // Force an explicit Metal-backed context so the downscale runs on the GPU, and encode OFF the
+    // ReplayKit capture thread so a slow JPEG/readback never throttles capture (the lag source).
+    private let ci: CIContext = {
+        if let dev = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: dev, options: [.cacheIntermediates: false])
+        }
+        return CIContext(options: [.cacheIntermediates: false])
+    }()
+    private let encodeQueue = DispatchQueue(label: "app.pillion.encode", qos: .userInteractive)
+    private var encoding = false           // drop frames while busy → latest-frame, never block capture
+    private let encodeLock = NSLock()
     private let lock = NSLock()
     private var latest: [UInt8]?
     private var lastEncode = Date(timeIntervalSince1970: 0)
     private var running = false
     private var seq = 1
-    private let sendInterval = 1.0 / Double(BroadcastConfig.maxFps)
+    // Live settings, read from the App Group at broadcastStarted (default until then).
+    private var sendInterval = 1.0 / Double(BroadcastConfig.maxFps)
+    private var jpegQuality = 0.4
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         running = true
+        // Pull the user's live Settings (fps / quality) from the App Group.
+        sendInterval = 1.0 / Double(BroadcastConfig.liveMaxFps())
+        jpegQuality = BroadcastConfig.liveJpegQuality()
+        NSLog("PillionExt: settings — fps=%d quality=%.2f",
+              BroadcastConfig.liveMaxFps(), jpegQuality)
         BroadcastSignal.post(BroadcastSignal.started)
         // Enumerate EVERY connected MFi accessory up front so a bike test is diagnosable even when the
         // protocol string doesn't match (otherwise we silently fall back to TCP and learn nothing about
@@ -47,8 +65,11 @@ class SampleHandler: RPBroadcastSampleHandler {
         NSLog("PillionExt: transport = %@", hasBike ? "bike (External Accessory)" : "emulator (TCP)")
         Thread.detachNewThread { [weak self] in
             guard let self = self else { return }
-            do { try self.conn.connect(); try self.handshake(); self.pushLoop() }
-            catch { NSLog("PillionExt connect err: %@", (error as NSError).localizedDescription) }
+            do {
+                try self.conn.connect()
+                try self.handshake()
+                self.pushLoop()
+            } catch { NSLog("PillionExt connect err: %@", (error as NSError).localizedDescription) }
         }
     }
 
@@ -66,40 +87,35 @@ class SampleHandler: RPBroadcastSampleHandler {
         NSLog("PillionExt: auth + setup done")
     }
 
-    // Cap how long we block waiting for a frame's image ack. The dash acks each IMAGE_FRAME 1:1, so we
-    // stay in lockstep (matches Android's MirrorEngine, which gets ~12 fps this way), but a slow/dropped
-    // ack must not freeze the stream — the old 2 s deadline turned a single missed ack into a 2 s stall.
-    private let ackBudget: TimeInterval = 0.5
-
+    /// Sender: stop-and-wait. Paces to the target fps, ships the freshest frame, then blocks on that
+    /// frame's IMAGE_ACK (svc 80) before sending the next — so exactly one frame is ever on the link.
+    /// The 2-in-flight pipeline buffered a frame ahead, which added a whole round-trip of latency on
+    /// slower dashes; stop-and-wait trades a little peak throughput for a visibly lower-latency mirror.
     private func pushLoop() {
-        var frames = 0, acks = 0; var t0 = Date()
         var lastSend = Date(timeIntervalSince1970: 0)
-        var sendTotal = 0.0, ackTotal = 0.0
+        var acks = 0; var t0 = Date(); var ackTotal = 0.0
         while running {
-            // Pace to the target fps and always send the freshest frame. Without this we send as fast
-            // as the link ACKs (~77 fps on WiFi), flooding the dash/viewer so latency builds up.
             let wait = sendInterval - Date().timeIntervalSince(lastSend)
             if wait > 0 { usleep(UInt32(wait * 1_000_000)) }
             lock.lock(); let j = latest; lock.unlock()
             guard let jpg = j else { usleep(15000); continue }
             lastSend = Date()
             var pl: [UInt8] = [3, UInt8(seq & 0xff), UInt8((seq >> 8) & 0xff)]; pl.append(contentsOf: jpg); seq += 1
-            let s0 = Date(); conn.write(NaviLite.frame(6, 0, 1, pl)); sendTotal += Date().timeIntervalSince(s0)
-            // Wait for the image ack (svc 80), but cap the total wait at ackBudget so a dropped ack can't
-            // freeze the dash. Read with the *remaining* budget so interleaved frames don't extend it.
-            let a0 = Date(); let deadline = a0.addingTimeInterval(ackBudget)
+            conn.write(NaviLite.frame(6, 0, 1, pl))
+            let sent = Date()
+            // Wait for this frame's ACK before sending the next; on timeout, move on so a dropped ACK
+            // can't wedge the stream.
             while running {
-                let remain = deadline.timeIntervalSinceNow
-                if remain <= 0 { break }
-                if (try? conn.readFrame(timeout: remain))?.svc == 80 { acks += 1; break }
+                guard let f = try? conn.readFrame(timeout: 1.0) else { break }
+                if f.svc == 80 { break }
             }
-            ackTotal += Date().timeIntervalSince(a0)
-            frames += 1; let dt = Date().timeIntervalSince(t0)
+            acks += 1
+            ackTotal += Date().timeIntervalSince(sent)
+            let dt = Date().timeIntervalSince(t0)
             if dt >= 1 {
-                NSLog("PillionExt: FPS %.1f  %dKB  send %.0fms ack %.0fms  acks %d/%d",
-                      Double(frames) / dt, jpg.count / 1024,
-                      sendTotal / Double(frames) * 1000, ackTotal / Double(frames) * 1000, acks, frames)
-                frames = 0; acks = 0; sendTotal = 0; ackTotal = 0; t0 = Date()
+                NSLog("PillionExt: FPS %.1f  %dKB  ack %.0fms",
+                      Double(acks) / dt, jpg.count / 1024, ackTotal / Double(max(acks, 1)) * 1000)
+                acks = 0; ackTotal = 0; t0 = Date()
             }
         }
     }
@@ -108,37 +124,47 @@ class SampleHandler: RPBroadcastSampleHandler {
         guard type == .video, running else { return }
         // Encode a touch faster than we send so a fresh frame is always ready, but no faster.
         let now = Date(); if now.timeIntervalSince(lastEncode) < sendInterval * 0.8 { return }; lastEncode = now
-        // Broadcast extensions are killed past ~50 MB. CoreImage/JPEG temporaries pile up faster than
-        // ARC drains them at frame rate, so each encode runs in its own autorelease pool.
-        autoreleasepool {
-            guard let pb = CMSampleBufferGetImageBuffer(sb) else { return }
-            var orient = CGImagePropertyOrientation.up
-            if let n = CMGetAttachment(sb, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber,
-               let o = CGImagePropertyOrientation(rawValue: n.uint32Value) { orient = o }
-            let fix: CGImagePropertyOrientation
-            switch orient {
-            case .left: fix = .right
-            case .right: fix = .left
-            case .leftMirrored: fix = .rightMirrored
-            case .rightMirrored: fix = .leftMirrored
-            default: fix = orient   // up/down are self-inverse
+        // Drop this frame if the previous encode is still running — latest-frame semantics, and it keeps
+        // ReplayKit's capture thread from ever blocking on the GPU render + JPEG (the lag source).
+        encodeLock.lock(); let busy = encoding; if !busy { encoding = true }; encodeLock.unlock()
+        if busy { return }
+        guard let pb = CMSampleBufferGetImageBuffer(sb) else {
+            encodeLock.lock(); encoding = false; encodeLock.unlock(); return
+        }
+        var orient = CGImagePropertyOrientation.up
+        if let n = CMGetAttachment(sb, key: RPVideoSampleOrientationKey as CFString, attachmentModeOut: nil) as? NSNumber,
+           let o = CGImagePropertyOrientation(rawValue: n.uint32Value) { orient = o }
+        let fix: CGImagePropertyOrientation
+        switch orient {
+        case .left: fix = .right
+        case .right: fix = .left
+        case .leftMirrored: fix = .rightMirrored
+        case .rightMirrored: fix = .leftMirrored
+        default: fix = orient   // up/down are self-inverse
+        }
+        // Retain the sample buffer for the async encode (keeps the pixel buffer's memory valid); only
+        // one is ever held at a time thanks to the drop-if-busy guard, so the pool can't starve.
+        encodeQueue.async { [weak self] in
+            guard let self = self else { return }
+            defer { self.encodeLock.lock(); self.encoding = false; self.encodeLock.unlock() }
+            // Broadcast extensions are killed past ~50 MB; each encode runs in its own autorelease pool.
+            autoreleasepool {
+                let img = CIImage(cvPixelBuffer: pb).oriented(fix)
+                let e = img.extent
+                // Aspect-FIT (letterbox): whole screen centred on the 480×240 panel with black bars.
+                let scale = min(480.0 / e.width, 240.0 / e.height)
+                let s = img.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                let se = s.extent
+                let tx = (480 - se.width) / 2 - se.origin.x
+                let ty = (240 - se.height) / 2 - se.origin.y
+                let centered = s.transformed(by: CGAffineTransform(translationX: tx, y: ty))
+                let canvas = CGRect(x: 0, y: 0, width: 480, height: 240)
+                let cropped = centered.composited(over: CIImage(color: .black).cropped(to: canvas)).cropped(to: canvas)
+                let opts: [CIImageRepresentationOption: Any] =
+                    [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): self.jpegQuality]
+                guard let data = self.ci.jpegRepresentation(of: cropped, colorSpace: CGColorSpaceCreateDeviceRGB(), options: opts) else { return }
+                self.lock.lock(); self.latest = [UInt8](data); self.lock.unlock()
             }
-            let img = CIImage(cvPixelBuffer: pb).oriented(fix)
-            let e = img.extent
-            // Aspect-FIT (letterbox): show the whole screen, centred on the 480×240 panel with black
-            // bars. Works for landscape (near-full) and portrait (pillarboxed) without cropping.
-            let scale = min(480.0 / e.width, 240.0 / e.height)
-            let s = img.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            let se = s.extent
-            let tx = (480 - se.width) / 2 - se.origin.x
-            let ty = (240 - se.height) / 2 - se.origin.y
-            let centered = s.transformed(by: CGAffineTransform(translationX: tx, y: ty))
-            let canvas = CGRect(x: 0, y: 0, width: 480, height: 240)
-            let cropped = centered.composited(over: CIImage(color: .black).cropped(to: canvas)).cropped(to: canvas)
-            let opts: [CIImageRepresentationOption: Any] =
-                [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.4]
-            guard let data = ci.jpegRepresentation(of: cropped, colorSpace: CGColorSpaceCreateDeviceRGB(), options: opts) else { return }
-            lock.lock(); latest = [UInt8](data); lock.unlock()
         }
     }
 

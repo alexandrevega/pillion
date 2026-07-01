@@ -21,20 +21,35 @@ class RfcommByteChannel : ByteChannel {
     @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT is requested by the Activity before start
     override fun open() {
         val adapter = BluetoothAdapter.getDefaultAdapter() ?: error("no Bluetooth adapter")
-        val dash = adapter.bondedDevices.firstOrNull { d ->
-            val n = d.name
-            n != null && (n.startsWith("YCCU") || n.contains("CCU"))
-        } ?: error("dash (YCCU…) is not paired")
-        Log.d("Pillion", "rfcomm: connecting to ${dash.name}")
+        // A phone may be paired with several "CCU" dashes at once — a real bike (e.g. YCCU_<serial>)
+        // AND a dev emulator (YCCU-dev / YCCU-test). Picking just the first match dialed the wrong one
+        // (the emulator) and timed out while the bike sat ignored. So try each candidate, real bikes
+        // first (dev/test emulators last), and use the first that actually connects.
+        val candidates = adapter.bondedDevices
+            .filter { d -> d.name?.let { it.startsWith("YCCU") || it.contains("CCU") } == true }
+            .sortedBy { d -> val n = d.name?.lowercase().orEmpty(); if ("dev" in n || "test" in n) 1 else 0 }
+        if (candidates.isEmpty()) error("dash (YCCU…) is not paired")
         // cancelDiscovery() needs BLUETOOTH_SCAN on Android 12+; it's only a connect-speed
         // optimization (nothing is discovering here), so ignore it if the permission is absent.
         runCatching { adapter.cancelDiscovery() }
-        val s = dash.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
-        s.connect()
-        socket = s
-        input = s.inputStream
-        output = s.outputStream
-        Log.d("Pillion", "rfcomm: connected")
+        var lastError: Throwable? = null
+        for (dash in candidates) {
+            Log.d("Pillion", "rfcomm: connecting to ${dash.name}")
+            try {
+                val s = dash.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+                s.connect()
+                socket = s
+                input = s.inputStream
+                output = s.outputStream
+                Log.d("Pillion", "rfcomm: connected to ${dash.name}")
+                return
+            } catch (t: Throwable) {
+                lastError = t
+                Log.d("Pillion", "rfcomm: ${dash.name} unreachable (${t.message}); trying next")
+                runCatching { socket?.close() }
+            }
+        }
+        throw lastError ?: IllegalStateException("no CCU dash connectable")
     }
 
     override fun write(bytes: ByteArray) {

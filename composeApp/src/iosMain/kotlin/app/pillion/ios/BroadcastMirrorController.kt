@@ -6,6 +6,7 @@ import app.pillion.core.MirrorState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import platform.Foundation.NSUserDefaults
 
 /**
  * Backs the Pillion "Start mirroring" button on iOS with the ReplayKit Broadcast Upload Extension.
@@ -24,8 +25,21 @@ class BroadcastMirrorController : MirrorController {
     private val _state = MutableStateFlow<MirrorState>(MirrorState.Idle)
     override val state: StateFlow<MirrorState> = _state.asStateFlow()
 
-    override fun start(settings: MirrorSettings) { onToggle?.invoke() }
+    override fun start(settings: MirrorSettings) {
+        // Hand the live settings to the out-of-process broadcast extension via the shared App Group
+        // (it can't read the app's own UserDefaults). The extension reads these at broadcastStarted.
+        NSUserDefaults(suiteName = APP_GROUP)?.apply {
+            setInteger(settings.maxFps.toLong(), forKey = "stream.maxFps")
+            setInteger(settings.quality.toLong(), forKey = "stream.quality")
+        }
+        onToggle?.invoke()
+    }
+
     override fun stop() { onToggle?.invoke() }
+
+    private companion object {
+        const val APP_GROUP = "group.app.pillion"
+    }
 
     /** Called by the Swift shell from the extension's broadcast start/finish Darwin notifications. */
     fun setActive(active: Boolean) {
