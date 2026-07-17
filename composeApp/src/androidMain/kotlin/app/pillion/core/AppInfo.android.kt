@@ -1,6 +1,6 @@
 package app.pillion.core
 
-import app.pillion.BuildConfig
-
-/** Android reads its version from the build's `versionName` (BuildConfig). */
-internal actual fun platformAppVersion(): String = BuildConfig.VERSION_NAME
+// ponytail: KMP library modules have no BuildConfig, so the version is Gradle-generated into
+// BUILD_VERSION_NAME (see composeApp/build.gradle.kts) from the same catalog entry androidApp's
+// versionName reads — one source of truth (libs.versions.toml `app-versionName`).
+internal actual fun platformAppVersion(): String = BUILD_VERSION_NAME

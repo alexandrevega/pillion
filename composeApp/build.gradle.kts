@@ -1,20 +1,47 @@
-import java.io.FileInputStream
-import java.util.Properties
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.androidApplication)
+    alias(libs.plugins.androidKmpLibrary)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.kover)
 }
 
+// Gradle-generates the app version into composeApp (KMP library modules have no BuildConfig) from
+// the same catalog entry androidApp's versionName reads — see AppInfo.android.kt.
+val generatedVersionDir = layout.buildDirectory.dir("generated/version/kotlin")
+val generateVersionInfo = tasks.register("generateVersionInfo") {
+    val outputDir = generatedVersionDir
+    val versionName = libs.versions.app.versionName.get()
+    outputs.dir(outputDir)
+    doLast {
+        val file = outputDir.get().file("app/pillion/core/VersionInfo.kt").asFile
+        file.parentFile.mkdirs()
+        file.writeText(
+            """
+            package app.pillion.core
+
+            internal const val BUILD_VERSION_NAME = "$versionName"
+
+            """.trimIndent(),
+        )
+    }
+}
+
 kotlin {
-    androidTarget {
+    android {
+        namespace = "app.pillion.shared"
+        compileSdk = libs.versions.android.compileSdk.get().toInt()
+        minSdk = libs.versions.android.minSdk.get().toInt()
+
         compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_11)
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
         }
+
+        androidResources { enable = true }
+
+        // Backs the JVM unit tests in commonTest (protocol codec, head-unit profiles/registry,
+        // SemVer, controllers) that stub android.util.Log via the shared Logger.
+        withHostTest {}
     }
 
     listOf(iosX64(), iosArm64(), iosSimulatorArm64()).forEach { iosTarget ->
@@ -25,15 +52,12 @@ kotlin {
     }
 
     sourceSets {
-        androidMain.dependencies {
-            implementation(compose.preview)
-            implementation(libs.androidx.activity.compose)
-            // In-app ADB (wireless-debugging pairing + shell) for the dedicated-dash bootstrap.
-            implementation(libs.libadb.android)
-            implementation(libs.bouncycastle.pkix)
-            implementation(libs.conscrypt.android)
-            // SDL "Path B": USB/AOA full-motion H.264 to USB head units (Tracer etc.).
-            implementation(libs.smartdevicelink.android)
+        androidMain {
+            kotlin.srcDir(generateVersionInfo)
+            dependencies {
+                // BackHandler.android.kt delegates to androidx.activity.compose.BackHandler.
+                implementation(libs.androidx.activity.compose)
+            }
         }
         commonMain.dependencies {
             implementation(compose.runtime)
@@ -65,8 +89,6 @@ kover {
             excludes {
                 classes(
                     "app.pillion.ui.*",          // Compose screens
-                    "app.pillion.android.*",     // Android services / framework glue
-                    "app.pillion.server.*",      // Ktor dash server (device-bound)
                     "app.pillion.resources.*",   // generated resource accessors
                     "*ComposableSingletons*",
                     "*ComposeApp*",
@@ -74,63 +96,5 @@ kover {
                 annotatedBy("androidx.compose.runtime.Composable")
             }
         }
-    }
-}
-
-// Release signing is read from a gitignored keystore.properties (local only). When it's absent
-// (e.g. a fresh clone or CI), release builds are simply left unsigned so the project still builds.
-val keystorePropertiesFile = rootProject.file("keystore.properties")
-val keystoreProperties = Properties().apply {
-    if (keystorePropertiesFile.exists()) FileInputStream(keystorePropertiesFile).use { load(it) }
-}
-
-android {
-    namespace = "app.pillion"
-    compileSdk = libs.versions.android.compileSdk.get().toInt()
-
-    defaultConfig {
-        applicationId = "app.pillion"
-        minSdk = libs.versions.android.minSdk.get().toInt()
-        targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 2
-        versionName = "0.2.0-alpha"
-    }
-    // Exposes VERSION_NAME so AppInfo.VERSION reads the build's own version (not a hardcoded copy).
-    buildFeatures {
-        buildConfig = true
-    }
-    packaging {
-        resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        }
-    }
-    testOptions {
-        unitTests {
-            // Stub android.util.Log etc. in JVM unit tests (the shared Logger maps to android.util.Log
-            // on this target) so commonTest can exercise logging code paths without an emulator.
-            isReturnDefaultValues = true
-        }
-    }
-    signingConfigs {
-        if (keystorePropertiesFile.exists()) {
-            create("release") {
-                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
-                storePassword = keystoreProperties.getProperty("storePassword")
-                keyAlias = keystoreProperties.getProperty("keyAlias")
-                keyPassword = keystoreProperties.getProperty("keyPassword")
-            }
-        }
-    }
-    buildTypes {
-        getByName("release") {
-            isMinifyEnabled = false
-            if (keystorePropertiesFile.exists()) {
-                signingConfig = signingConfigs.getByName("release")
-            }
-        }
-    }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
     }
 }
