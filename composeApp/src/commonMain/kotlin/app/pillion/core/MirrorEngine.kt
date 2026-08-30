@@ -43,13 +43,28 @@ class MirrorEngine(
                 // isn't created promptly, so we must not defer it behind the Bluetooth handshake.
                 Logger.d("session: starting screen capture")
                 screen.start()
-                Logger.d("session: connecting transport")
-                channel.open()
-                val reader = FrameReader(channel)
-                Logger.d("session: handshake")
-                Handshake(channel, reader).perform()
-                Logger.d("session: streaming")
-                streamLoop(reader)
+                // Reconnect loop: the dash can drop the Bluetooth link on its own (e.g. some dashes
+                // terminate it when the phone locks — HCI peer-terminated), which breaks the RFCOMM
+                // write mid-stream. Rather than failing the whole session, re-open + re-handshake and
+                // resume, so a drop is a brief reconnect instead of a dead session. Only stop() ends it.
+                while (running) {
+                    try {
+                        _state.value = MirrorState.Connecting
+                        Logger.d("session: connecting transport")
+                        channel.open()
+                        val reader = FrameReader(channel)
+                        Logger.d("session: handshake")
+                        Handshake(channel, reader).perform()
+                        seq = 1 // fresh sequence per (re)connect, matching a new session
+                        Logger.d("session: streaming")
+                        streamLoop(reader)
+                    } catch (t: Throwable) {
+                        if (!running) break
+                        Logger.e("session dropped; reconnecting in ${RECONNECT_DELAY_MS}ms", t)
+                        runCatching { channel.close() }
+                        sleepMs(RECONNECT_DELAY_MS)
+                    }
+                }
             } catch (t: Throwable) {
                 Logger.e("session failed", t)
                 if (running) _state.value = MirrorState.Error(t.message ?: "connection lost")
@@ -127,5 +142,10 @@ class MirrorEngine(
         jpeg.copyInto(payload, 3)
         seq++
         channel.write(NaviLiteCodec.build(FRAME_TYPE_PHONE, ServiceType.IMAGE, PDT_POINTER, payload))
+    }
+
+    private companion object {
+        /** Wait between a dropped link and a reconnect attempt (the dash needs a moment to settle). */
+        const val RECONNECT_DELAY_MS = 1500L
     }
 }
