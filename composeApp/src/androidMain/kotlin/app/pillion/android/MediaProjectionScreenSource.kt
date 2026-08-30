@@ -29,6 +29,10 @@ class MediaProjectionScreenSource(
     private var reader: ImageReader? = null
     private var display: VirtualDisplay? = null
     @Volatile private var latest: Bitmap? = null
+    // Output size sent over NaviLite. Capture is fixed at WIDTHxHEIGHT (the token must be claimed
+    // before the handshake reveals the dash size), so we scale the captured frame to this instead.
+    @Volatile private var outWidth = WIDTH
+    @Volatile private var outHeight = HEIGHT
 
     override fun start() {
         if (display != null) return // idempotent: capture may be pre-started by the service
@@ -74,9 +78,24 @@ class MediaProjectionScreenSource(
 
     override fun latestFrame(): ByteArray? {
         val bitmap = latest ?: return null
+        val w = outWidth
+        val h = outHeight
+        val scaled = if (bitmap.width != w || bitmap.height != h) {
+            Bitmap.createScaledBitmap(bitmap, w, h, true)
+        } else {
+            bitmap
+        }
         val out = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        if (scaled !== bitmap) scaled.recycle()
         return out.toByteArray()
+    }
+
+    override fun resizeOutput(width: Int, height: Int) {
+        if (width == outWidth && height == outHeight) return
+        outWidth = width
+        outHeight = height
+        Log.d(TAG, "screen: output size set to ${width}x$height")
     }
 
     override fun stop() {

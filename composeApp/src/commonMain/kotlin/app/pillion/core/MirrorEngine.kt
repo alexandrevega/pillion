@@ -47,7 +47,9 @@ class MirrorEngine(
                 channel.open()
                 val reader = FrameReader(channel)
                 Logger.d("session: handshake")
-                Handshake(channel, reader).perform()
+                val dashSize = Handshake(channel, reader).perform()
+                Logger.d("session: dash size ${dashSize.width}x${dashSize.height}")
+                screen.resizeOutput(dashSize.width, dashSize.height)
                 Logger.d("session: streaming")
                 streamLoop(reader)
             } catch (t: Throwable) {

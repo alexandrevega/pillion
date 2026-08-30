@@ -30,6 +30,11 @@ class SwitchableScreenSource(
         runCatching { dash.stop() }
     }
 
+    override fun resizeOutput(width: Int, height: Int) {
+        mirror.resizeOutput(width, height)
+        dash.resizeOutput(width, height)
+    }
+
     /** Phone locked: promote the foreground app to the dash and stream it. */
     fun promote(component: String) {
         dash.promote(component)
