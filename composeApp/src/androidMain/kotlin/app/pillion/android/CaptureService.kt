@@ -50,6 +50,11 @@ class CaptureService : Service() {
     private var keyguardListener: Any? = null
     @Volatile private var dashPromotedAtMs = 0L
     @Volatile private var dashSawLockedKeyguard = false
+    // Pinned-mode panel state: whether the phone panel is currently forced off (screen locked), and
+    // when, so the user's wake-press (which arrives as SCREEN_OFF because the device is kept awake) is
+    // treated as "restore" instead of "engage again".
+    @Volatile private var dashPanelEngaged = false
+    @Volatile private var dashPanelEngagedAtMs = 0L
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -63,8 +68,96 @@ class CaptureService : Service() {
         val maxFps = intent?.getIntExtra(EXTRA_MAX_FPS, 15) ?: 15
         val dashResolution = dashResolutionFrom(intent)
         dashEnabled = intent?.getBooleanExtra(EXTRA_DASH_ENABLED, false) ?: false
-        startSession(quality, maxFps, dashResolution)
+        val dashApp = intent?.getStringExtra(EXTRA_DASH_APP)
+        if (intent?.getBooleanExtra(EXTRA_DASH_ONLY, false) == true && dashApp != null) {
+            startDashOnlySession(quality, maxFps, dashResolution, dashApp)
+        } else {
+            startSession(quality, maxFps, dashResolution)
+        }
         return START_NOT_STICKY
+    }
+
+    /**
+     * Dash-only pinned mode: render ONE chosen app in landscape on the dedicated dash display and keep
+     * it there regardless of what the phone does. No MediaProjection and no mirroring — frames come
+     * only from the helper over loopback — so phone orientation, app-switching and screen lock are all
+     * irrelevant (this sidesteps the OS revoking MediaProjection on lock entirely).
+     */
+    private fun startDashOnlySession(quality: Int, maxFps: Int, dashResolution: DashResolution, appComponent: String) {
+        dashEnabled = true
+        runCatching { startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE) }
+        val dash = DashStreamScreenSource()
+        dash.setPowerManagement(false) // keep the phone fully usable — never touch its screen power
+        val switch = SwitchableScreenSource(dash, dash) // dash on both sides: always dash, never mirror
+        dashSwitch = switch
+        switch.promote(appComponent) // queued until the helper connects, then replayed (syncDesiredState)
+        // While the phone is in use the panel is untouched; only when the user locks (screen off) do we
+        // engage the keep-alive-while-locked treatment so the dash keeps rendering. Released on unlock.
+        registerDashOnlyPanelReceiver(dash)
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                DashHelper.ensureRunning(this@CaptureService, quality, dashResolution, preferExisting = true)
+            }.onFailure {
+                Log.e(TAG, "dash: helper unavailable", it)
+                fail(it.message ?: "Dash helper unavailable")
+            }
+        }
+        DashHelper.startWatchdog(this, quality, dashResolution)
+        Log.d(TAG, "dash-only: pinning $appComponent")
+        runEngine(switch, maxFps)
+    }
+
+    /**
+     * Dash-only pinned mode keeps the phone usable, so the panel is left alone while in use. Only on
+     * screen-off (lock) do we tell the helper to engage the panel-off/keep-alive that keeps the dash
+     * display group rendering; on unlock we release it. No app relocation here (the app stays pinned),
+     * so there's nothing to oscillate.
+     */
+    private fun registerDashOnlyPanelReceiver(dash: DashStreamScreenSource) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                val action = intent.action
+                scope.launch(Dispatchers.IO) {
+                    when (action) {
+                        Intent.ACTION_SCREEN_OFF -> {
+                            if (!dashPanelEngaged) {
+                                // User locked → force the panel off so the dash keeps rendering.
+                                dash.setPanelOff(true)
+                                dashPanelEngaged = true
+                                dashPanelEngagedAtMs = System.currentTimeMillis()
+                            } else if (System.currentTimeMillis() - dashPanelEngagedAtMs >= RETURN_TO_PHONE_GRACE_MS) {
+                                // Already locked: the device is kept awake with the panel off, so the
+                                // user's wake-press arrives as SCREEN_OFF. Treat it as "restore".
+                                dash.setPanelOff(false)
+                                dashPanelEngaged = false
+                            }
+                        }
+                        Intent.ACTION_SCREEN_ON -> {
+                            // Engaging panel-off re-wakes the dash group, which fires a synthetic
+                            // SCREEN_ON here. Ignore that within the settle window; only a real
+                            // screen-on after it means the user wants the phone back.
+                            if (dashPanelEngaged &&
+                                System.currentTimeMillis() - dashPanelEngagedAtMs >= RETURN_TO_PHONE_GRACE_MS
+                            ) {
+                                dash.setPanelOff(false)
+                                dashPanelEngaged = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON) // release on any screen-on (lockscreen or unlock)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(receiver, filter)
+        }
+        screenReceiver = receiver
     }
 
     /**
@@ -152,10 +245,7 @@ class CaptureService : Service() {
                             if (component == null) {
                                 Log.w(TAG, "dash: no foreground app; usage access may be missing")
                             } else {
-                                dashSwitch?.promote(component)
-                                dashPromotedAtMs = System.currentTimeMillis()
-                                dashSawLockedKeyguard = isKeyguardLockedNow()
-                                scheduleLockStateSample(dashPromotedAtMs)
+                                promoteForeground(component)
                             }
                         }
                         Intent.ACTION_SCREEN_ON -> {
@@ -332,6 +422,14 @@ class CaptureService : Service() {
         return component
     }
 
+    /** Promote [component] to the dash and record the promotion (shared by lock + background paths). */
+    private fun promoteForeground(component: String) {
+        dashSwitch?.promote(component)
+        dashPromotedAtMs = System.currentTimeMillis()
+        dashSawLockedKeyguard = isKeyguardLockedNow()
+        scheduleLockStateSample(dashPromotedAtMs)
+    }
+
     private fun runEngine(screen: ScreenSource, maxFps: Int) {
         val mirror = MirrorEngine(RfcommByteChannel(), screen, maxFps)
         engine = mirror
@@ -454,6 +552,9 @@ class CaptureService : Service() {
         const val EXTRA_DASH_ENABLED = "dashEnabled"
         const val EXTRA_DASH_WIDTH = "dashWidth"
         const val EXTRA_DASH_HEIGHT = "dashHeight"
+        /** Dash-only pinned mode: render one chosen app on the dedicated display, no MediaProjection. */
+        const val EXTRA_DASH_ONLY = "dashOnly"
+        const val EXTRA_DASH_APP = "dashApp"
 
         // Handed over by the Activity after the user grants screen capture.
         @Volatile var resultCode: Int = 0

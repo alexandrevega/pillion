@@ -12,6 +12,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import app.pillion.core.AppInfo
 import app.pillion.core.DashSetup
 import app.pillion.core.DashResolution
+import app.pillion.core.InstalledApps
 import app.pillion.core.MirrorController
 import app.pillion.core.MirrorSettings
 import app.pillion.core.SettingsStore
@@ -35,6 +36,7 @@ fun App(
     updateChecker: UpdateChecker? = null,
     settingsStore: SettingsStore? = null,
     dashSetup: DashSetup? = null,
+    installedApps: InstalledApps? = null,
 ) {
     var themeMode by remember { mutableStateOf(settingsStore?.themeMode() ?: ThemeMode.SYSTEM) }
     PillionTheme(themeMode) {
@@ -60,17 +62,31 @@ fun App(
         var showDashOnboarding by rememberSaveable { mutableStateOf(false) }
         var dashEnabled by remember { mutableStateOf(settingsStore?.dashEnabled() ?: false) }
         var dashResolution by remember { mutableStateOf(settingsStore?.dashResolution() ?: DashResolution.DEFAULT) }
+        var dashApp by remember { mutableStateOf(settingsStore?.dashApp()) }
+        var showAppPicker by rememberSaveable { mutableStateOf(false) }
+        val dashAppLabel = remember(dashApp) {
+            dashApp?.let { comp -> installedApps?.launchable()?.firstOrNull { it.component == comp }?.label ?: comp }
+        }
         var showDisclaimer by rememberSaveable { mutableStateOf(true) }
         var update by remember { mutableStateOf<UpdateInfo?>(null) }
         var updateDismissed by rememberSaveable { mutableStateOf(false) }
         val uriHandler = LocalUriHandler.current
 
         LaunchedEffect(updateChecker) { update = updateChecker?.newerThan(AppInfo.VERSION) }
-        BackHandler(enabled = showSettings || showDashOnboarding) {
-            if (showDashOnboarding) showDashOnboarding = false else showSettings = false
+        BackHandler(enabled = showSettings || showDashOnboarding || showAppPicker) {
+            if (showAppPicker) showAppPicker = false
+            else if (showDashOnboarding) showDashOnboarding = false
+            else showSettings = false
         }
 
-        if (showDashOnboarding && dashSetup != null) {
+        if (showAppPicker && installedApps != null) {
+            DashAppPicker(
+                installedApps = installedApps,
+                selected = dashApp,
+                onSelect = { dashApp = it; settingsStore?.setDashApp(it) },
+                onBack = { showAppPicker = false },
+            )
+        } else if (showDashOnboarding && dashSetup != null) {
             DashOnboarding(
                 dash = dashSetup,
                 onOptOut = {
@@ -98,6 +114,8 @@ fun App(
                 },
                 onSetUpDash = { showDashOnboarding = true },
                 onDisableDash = { dashEnabled = false; settingsStore?.setDashEnabled(false) },
+                dashAppLabel = dashAppLabel,
+                onChooseDashApp = if (installedApps != null) ({ showAppPicker = true }) else null,
                 bikeName = profile.displayName,
                 onChangeBike = { showSettings = false; changingBike = true; selectedBikeId = null },
                 update = update,
@@ -108,7 +126,7 @@ fun App(
                 state = state,
                 update = update,
                 onOpenSettings = { showSettings = true },
-                onStart = { controller.start(MirrorSettings(quality, maxFps, dashResolution)) },
+                onStart = { controller.start(MirrorSettings(quality, maxFps, dashResolution, dashApp = dashApp)) },
                 onStop = controller::stop,
             )
         }

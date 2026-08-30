@@ -27,6 +27,7 @@ class DashStreamScreenSource : ScreenSource {
     @Volatile private var staleLogged = false
     @Volatile private var desiredComponent: String? = null
     @Volatile private var desiredSize: String? = null
+    @Volatile private var desiredPower: String? = null
 
     override fun start() {
         if (running) return
@@ -94,6 +95,25 @@ class DashStreamScreenSource : ScreenSource {
         send("SIZE $width $height\n")
     }
 
+
+    /**
+     * Enable/disable the helper's phone-power management. Disable it for dash-only "keep phone usable"
+     * mode so streaming never turns the phone's own screen off or forces it awake. Sent before PROMOTE
+     * and replayed first on reconnect so it's in effect when the app is promoted.
+     */
+    fun setPowerManagement(enabled: Boolean) {
+        desiredPower = if (enabled) "1" else "0"
+        send("POWER ${desiredPower}\n")
+    }
+
+    /**
+     * Engage/release the helper's keep-alive-while-locked panel treatment. Called on screen off/on so
+     * the dash keeps rendering when the phone is locked, without affecting the phone while it's in use.
+     */
+    fun setPanelOff(off: Boolean) {
+        send(if (off) "PANEL_OFF\n" else "PANEL_ON\n")
+    }
+
     /** Tell the helper to move the foreground app onto the dash display and start encoding. */
     fun promote(component: String) {
         desiredComponent = component
@@ -126,6 +146,7 @@ class DashStreamScreenSource : ScreenSource {
     }
 
     private fun syncDesiredState(s: Socket) {
+        desiredPower?.let { send(s, "POWER $it\n") } // before PROMOTE so it applies at promotion time
         desiredSize?.let { send(s, "SIZE $it\n") }
         val component = desiredComponent
         if (component == null) {

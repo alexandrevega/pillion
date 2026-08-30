@@ -20,4 +20,8 @@ interface SettingsStore {
      *  or null if they haven't chosen yet (→ show the bike-selection screen). */
     fun selectedBikeId(): String?
     fun setSelectedBikeId(id: String)
+
+    /** The app pinned to the dash (flattened launcher component), or null for none. */
+    fun dashApp(): String?
+    fun setDashApp(component: String?)
 }

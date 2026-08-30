@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import app.pillion.android.AndroidDashSetup
+import app.pillion.android.AndroidInstalledApps
 import app.pillion.android.AndroidMirrorController
 import app.pillion.android.AndroidSettingsStore
 import app.pillion.android.AdbPairingCoordinator
@@ -34,6 +35,7 @@ class MainActivity : ComponentActivity() {
 
     private var pendingSettings = MirrorSettings()
     private var pendingSdl = false // whether the in-flight projection grant is for the SDL/USB path
+    private var pendingDashOnly = false // dash-only pinned start waiting on runtime permissions (no projection)
     private val settingsStore by lazy { AndroidSettingsStore(applicationContext) }
 
     private val projectionLauncher = registerForActivityResult(
@@ -66,7 +68,9 @@ class MainActivity : ComponentActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { granted ->
-        if (granted.values.all { it }) requestProjection()
+        if (granted.values.all { it }) {
+            if (pendingDashOnly) startDashOnly(pendingSettings) else requestProjection()
+        }
     }
 
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -83,7 +87,9 @@ class MainActivity : ComponentActivity() {
             context = applicationContext,
             requestNotificationPermission = ::requestNotificationPermission,
         )
-        setContent { App(::controllerFor, updateChecker, settingsStore, dashSetup) }
+        setContent {
+            App(::controllerFor, updateChecker, settingsStore, dashSetup, AndroidInstalledApps(applicationContext))
+        }
     }
 
     /** Resolve the [MirrorController] for the selected head unit (DIP — the UI doesn't know which). */
@@ -102,10 +108,33 @@ class MainActivity : ComponentActivity() {
 
     private fun startMirroring(settings: MirrorSettings) {
         pendingSettings = settings
+        // Dash-only pinned mode renders one app on the dedicated display and needs NO MediaProjection,
+        // so skip the screen-capture consent entirely.
+        pendingDashOnly = !pendingSdl && settings.dashApp != null
         val missing = requiredPermissions().filter {
             checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isEmpty()) requestProjection() else permissionLauncher.launch(missing.toTypedArray())
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
+        } else if (pendingDashOnly) {
+            startDashOnly(settings)
+        } else {
+            requestProjection()
+        }
+    }
+
+    private fun startDashOnly(settings: MirrorSettings) {
+        pendingDashOnly = false
+        val intent = Intent(this, CaptureService::class.java)
+            .putExtra(CaptureService.EXTRA_QUALITY, settings.quality)
+            .putExtra(CaptureService.EXTRA_MAX_FPS, settings.maxFps)
+            .putExtra(CaptureService.EXTRA_DASH_ENABLED, true)
+            .putExtra(CaptureService.EXTRA_DASH_WIDTH, settings.dashResolution.width)
+            .putExtra(CaptureService.EXTRA_DASH_HEIGHT, settings.dashResolution.height)
+            .putExtra(CaptureService.EXTRA_DASH_ONLY, true)
+            .putExtra(CaptureService.EXTRA_DASH_APP, settings.dashApp)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+        else startService(intent)
     }
 
     private fun requestProjection() {
