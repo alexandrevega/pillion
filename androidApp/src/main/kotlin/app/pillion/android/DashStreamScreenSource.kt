@@ -26,6 +26,7 @@ class DashStreamScreenSource : ScreenSource {
     @Volatile private var lastFrameAt: Long = 0
     @Volatile private var staleLogged = false
     @Volatile private var desiredComponent: String? = null
+    @Volatile private var desiredSize: String? = null
 
     override fun start() {
         if (running) return
@@ -82,6 +83,17 @@ class DashStreamScreenSource : ScreenSource {
         return frame
     }
 
+    /**
+     * Tell the helper what dash size to encode to, resolved from the CCU part number after the
+     * handshake. Remembered so it replays on reconnect, and the stale frame is dropped so the engine
+     * never sends a frame at the previous size (which the dash would reject).
+     */
+    override fun resizeOutput(width: Int, height: Int) {
+        desiredSize = "$width $height"
+        latest = null
+        send("SIZE $width $height\n")
+    }
+
     /** Tell the helper to move the foreground app onto the dash display and start encoding. */
     fun promote(component: String) {
         desiredComponent = component
@@ -114,6 +126,7 @@ class DashStreamScreenSource : ScreenSource {
     }
 
     private fun syncDesiredState(s: Socket) {
+        desiredSize?.let { send(s, "SIZE $it\n") }
         val component = desiredComponent
         if (component == null) {
             send(s, "DEMOTE\n")

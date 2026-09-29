@@ -1,5 +1,7 @@
 package app.pillion
 
+import app.pillion.core.DashSize
+import app.pillion.core.NaviLiteDisplay
 import app.pillion.protocol.Auth
 import app.pillion.protocol.NaviLiteCodec
 import kotlin.test.Test
@@ -32,5 +34,21 @@ class ProtocolTest {
             assertEquals("006-B4160-00", Auth.partNumber(seed))
             assertEquals(expected, Auth.secDataAckPayload(seed).toHex())
         }
+    }
+
+    @Test
+    fun xmax_sec_data_identifies_the_scooter_ccu_and_its_480x234_dash() {
+        // Real SEC_DATA captured from a Yamaha XMAX (GitHub issue #7): part "006-B3952-03" + nonce.
+        val seed = hex("3a3a3c274839333f38273a39" + "2504211c")
+        assertEquals("006-B3952-03", Auth.partNumber(seed))
+        assertEquals("2f0e2b16", Auth.secDataAckPayload(seed).toHex())
+        assertEquals(DashSize(480, 234), NaviLiteDisplay.forCcuPartNumber(Auth.partNumber(seed)))
+    }
+
+    @Test
+    fun known_and_unknown_ccus_resolve_to_a_dash_size() {
+        assertEquals(DashSize(480, 240), NaviLiteDisplay.forCcuPartNumber("006-B4160-00")) // MT-07
+        assertEquals(DashSize(480, 234), NaviLiteDisplay.forCcuPartNumber("006-B3952-03")) // XMAX/NMAX
+        assertEquals(NaviLiteDisplay.DEFAULT, NaviLiteDisplay.forCcuPartNumber("006-XXXXX-99")) // unknown
     }
 }

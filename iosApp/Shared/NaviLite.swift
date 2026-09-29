@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// Swift NaviLite codec for the broadcast extension (a memory-limited process where linking the full
 /// Compose/Kotlin framework is undesirable). This mirrors the canonical Kotlin `NaviLiteCodec`
@@ -44,6 +45,16 @@ enum NaviLite {
 
     static func partNumber(_ seed: [UInt8]) -> String {
         String(bytes: seed[0..<max(0, seed.count - 4)].map { $0 ^ 0x0a }, encoding: .ascii) ?? "?"
+    }
+
+    /// Default 480x240 dash TFT (MT-07 / MT-09 / XSR900 / R9 / Tracer).
+    static let defaultDashSize = CGSize(width: 480, height: 240)
+
+    /// Navigation viewport size per CCU part number. The dash rejects a JPEG whose dimensions don't
+    /// match ("Connection Error"); the XMAX/NMAX scooter CCU (006-B3952-xx) renders 480x234.
+    /// Unknown part numbers fall back to the default so a new bike still connects.
+    static func dashSize(ccuPartNumber: String) -> CGSize {
+        ccuPartNumber.hasPrefix("006-B3952") ? CGSize(width: 480, height: 234) : defaultDashSize
     }
 
     static func hexB(_ s: String) -> [UInt8] {

@@ -11,4 +11,11 @@ interface ScreenSource {
     /** The most recent screen as a 480x240 JPEG, or null if no frame is available yet. */
     fun latestFrame(): ByteArray?
     fun stop()
+
+    /**
+     * Resize output frames to the dash's native size once the session resolves it from the head
+     * unit — NaviLite reveals it via the CCU part number at handshake time. Default no-op for
+     * sources whose size is fixed elsewhere.
+     */
+    fun resizeOutput(width: Int, height: Int) {}
 }

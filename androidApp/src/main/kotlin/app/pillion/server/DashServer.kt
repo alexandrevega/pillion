@@ -77,8 +77,9 @@ object DashServer {
 
     private var virtualWidth = 480
     private var virtualHeight = 240
-    private var outputWidth = 480
-    private var outputHeight = 240
+    // Read on the capture/encode thread, written from the control channel (SIZE) — must be volatile.
+    @Volatile private var outputWidth = 480
+    @Volatile private var outputHeight = 240
     private var quality = 40
     private var lastEncodeMs = 0L
     private var encodeWindowStartMs = 0L
@@ -226,6 +227,7 @@ object DashServer {
                 when {
                     line.startsWith("PROMOTE ") -> promoteApp(line.removePrefix("PROMOTE ").trim())
                     line == "DEMOTE" -> demoteApp()
+                    line.startsWith("SIZE ") -> resizeOutput(line.removePrefix("SIZE ").trim())
                     line == "QUIT" -> shutdown()
                 }
             }
@@ -236,6 +238,21 @@ object DashServer {
             // instead of sleeping forever.
             runCatching { client.close() }
         }
+    }
+
+    /**
+     * Resize the JPEG output to the dash's native size, resolved by the app from the CCU part number
+     * after the NaviLite handshake (e.g. 480x234 for the XMAX/NMAX scooter CCU). The trusted display
+     * keeps its render size; only the encoded frames are rescaled, from the next frame on.
+     */
+    private fun resizeOutput(arg: String) {
+        val parts = arg.split(' ')
+        val w = parts.getOrNull(0)?.toIntOrNull() ?: return
+        val h = parts.getOrNull(1)?.toIntOrNull() ?: return
+        if (w <= 0 || h <= 0 || (w == outputWidth && h == outputHeight)) return
+        outputWidth = w
+        outputHeight = h
+        Log.i(TAG, "output resized to ${w}x$h")
     }
 
     /** Move the foreground app onto the dash display and start encoding (phone just locked). */
