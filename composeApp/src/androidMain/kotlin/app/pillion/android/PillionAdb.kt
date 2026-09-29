@@ -108,11 +108,19 @@ class PillionAdb private constructor(
      * dash a channel it can use to **respawn the helper offline** if it ever gets killed.
      */
     fun enableTcpip(port: Int = TCPIP_PORT) {
-        runCatching {
-            val stream = openStream("tcpip:$port")
-            runCatching { stream.openInputStream().readBytes() } // adbd acks, then restarts
-            runCatching { stream.close() }
-        }
+        // adbd restarts the instant it handles "tcpip:", frequently WITHOUT acking the stream open —
+        // so openStream()/readBytes() on this (about-to-die) connection can block forever. We only
+        // need the side effect (adbd now listens on :port), not the ack, so run it on a worker and
+        // stop waiting after a short grace. close() then drops the dead connection, which also
+        // unblocks the worker's pending read so it can't leak.
+        val worker = Thread {
+            runCatching {
+                val stream = openStream("tcpip:$port")
+                runCatching { stream.openInputStream().readBytes() }
+                runCatching { stream.close() }
+            }
+        }.apply { isDaemon = true; start() }
+        worker.join(TCPIP_ACK_GRACE_MS)
         runCatching { close() } // the old (wireless) connection is dead now
     }
 
@@ -120,6 +128,9 @@ class PillionAdb private constructor(
         /** Loopback adb (always up, no Wi-Fi) once [enableTcpip] has run. */
         const val LOOPBACK_HOST = "127.0.0.1"
         const val TCPIP_PORT = 5555
+
+        /** Max wait for the (usually-absent) tcpip stream ack before we move on — adbd has restarted. */
+        private const val TCPIP_ACK_GRACE_MS = 2000L
 
         @Volatile private var instance: PillionAdb? = null
 
