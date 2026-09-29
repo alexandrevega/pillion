@@ -41,7 +41,7 @@ kotlin {
 
         // Backs the JVM unit tests in commonTest (protocol codec, head-unit profiles/registry,
         // SemVer, controllers) that stub android.util.Log via the shared Logger.
-        withHostTest {}
+        withHostTest { isReturnDefaultValues = true }
     }
 
     listOf(iosX64(), iosArm64(), iosSimulatorArm64()).forEach { iosTarget ->
