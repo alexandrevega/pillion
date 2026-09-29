@@ -38,10 +38,18 @@ class IosSettingsStore : SettingsStore {
         defaults.setObject(id, forKey = BIKE_KEY)
     }
 
+    override fun dashApp(): String? = defaults.stringForKey(DASH_APP_KEY)
+
+    override fun setDashApp(component: String?) {
+        if (component == null) defaults.removeObjectForKey(DASH_APP_KEY)
+        else defaults.setObject(component, forKey = DASH_APP_KEY)
+    }
+
     private companion object {
         const val THEME_KEY = "theme_mode"
         const val DASH_ENABLED_KEY = "dash_enabled"
         const val DASH_RES_KEY = "dash_resolution"
         const val BIKE_KEY = "selected_bike_id"
+        const val DASH_APP_KEY = "dash_app"
     }
 }

@@ -75,6 +75,8 @@ internal fun SettingsScreen(
     onDashResolution: (DashResolution) -> Unit = {},
     onSetUpDash: () -> Unit = {},
     onDisableDash: () -> Unit = {},
+    dashAppLabel: String? = null,
+    onChooseDashApp: (() -> Unit)? = null,
     bikeName: String = "",
     onChangeBike: () -> Unit = {},
     update: UpdateInfo?,
@@ -227,16 +229,30 @@ internal fun SettingsScreen(
                     GroupDivider()
                     LinkRow("Re-run setup (after a restart)") { onSetUpDash() }
                 }
+                if (dashEnabled && onChooseDashApp != null) {
+                    GroupDivider()
+                    LinkRow("Dash app: ${dashAppLabel ?: "None (mirror phone)"}") { onChooseDashApp() }
+                }
                 GroupDivider()
                 DashResolutionSelector(dashResolution, onDashResolution)
             }
             Text(
-                "Casts the real app to the dash in landscape with the screen off. Run setup once " +
-                    "while Wi-Fi is connected; after that it can start without Wi-Fi until restart.",
+                "Casts the real app to the dash. Run setup once while Wi-Fi is connected; after that it " +
+                        "can start without Wi-Fi until restart.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 6.dp, top = 8.dp, end = 6.dp),
             )
+            if (dashEnabled && onChooseDashApp != null) {
+                Text(
+                    "Dash app: pick one app to pin. It's rendered in landscape on the dash and stays " +
+                        "there while your phone keeps behaving normally — use other apps, no screen " +
+                        "forced off. Choose None for the regular behaviour.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 6.dp, top = 8.dp, end = 6.dp),
+                )
+            }
         }
 
         Spacer(Modifier.height(24.dp))

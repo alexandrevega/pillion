@@ -97,6 +97,9 @@ object DashServer {
     @Volatile private var lastComponent: String? = null
     @Volatile private var keepAlive: Thread? = null
     @Volatile private var panelOffRetry: Thread? = null
+    // When false (dash-only "keep phone usable" mode), never touch the phone's own screen power or
+    // force interactivity — render on the dash display and stream, leaving device behaviour untouched.
+    @Volatile private var managePower = true
 
     private const val KEEP_ALIVE_MS = 3000L // poke the dash display group well under its ~10s idle timeout
     private val PANEL_OFF_RETRY_DELAYS_MS = longArrayOf(700L, 1500L)
@@ -228,6 +231,9 @@ object DashServer {
                     line.startsWith("PROMOTE ") -> promoteApp(line.removePrefix("PROMOTE ").trim())
                     line == "DEMOTE" -> demoteApp()
                     line.startsWith("SIZE ") -> resizeOutput(line.removePrefix("SIZE ").trim())
+                    line.startsWith("POWER ") -> managePower = line.removePrefix("POWER ").trim() != "0"
+                    line == "PANEL_OFF" -> engagePanelOff()
+                    line == "PANEL_ON" -> restorePanel()
                     line == "QUIT" -> shutdown()
                 }
             }
@@ -255,16 +261,53 @@ object DashServer {
         Log.i(TAG, "output resized to ${w}x$h")
     }
 
+    /**
+     * Engage the keep-alive-while-locked treatment: force the phone's own panel off (it's already off
+     * when the user locks) and re-assert it, which — with the heartbeat — keeps the dash display group
+     * rendering. Driven by the app on SCREEN_OFF so it costs nothing while the phone is in use.
+     */
+    private fun engagePanelOff() {
+        if (!capturing) return
+        wakeDisplay(displayId)     // re-wake the dash group as the phone locks, so it keeps rendering
+                                   // (normal dash mode does this via promote-on-lock; pinned needs it here)
+        setMainDisplayPower(false)
+        startPanelOffRetries()
+    }
+
+    /** Release the panel-off treatment when the phone screen comes back on (unlock). */
+    private fun restorePanel() {
+        stopPanelOffRetries() // stop re-asserting OFF FIRST, or the restore fights it
+        setMainDisplayPower(true)
+        forceScreenOn()       // reliable fallback: the normal system wake recovers a panel that
+                              // setDisplayPowerMode(ON) can't (the black-on-unlock brick)
+    }
+
+    /**
+     * Turn the phone's screen back on via the **normal system wake** (KEYCODE_WAKEUP). This reliably
+     * recovers the panel when the low-level setDisplayPowerMode(ON) fails to restore it (observed on
+     * some foldables), so unlock can never leave the screen stranded black.
+     */
+    private fun forceScreenOn() {
+        runCatching { Runtime.getRuntime().exec(arrayOf("input", "keyevent", "224")).waitFor() }
+            .onFailure { Log.w(TAG, "restore: input wakeup failed: ${it.message}") }
+    }
+
     /** Move the foreground app onto the dash display and start encoding (phone just locked). */
     private fun promoteApp(component: String) {
         if (displayId < 0 || component.isEmpty()) return
         relocateApp(component, displayId)
         lastComponent = component
         capturing = true
-        startHeartbeat()          // keep the device interactive so the dash group renders
-        setMainDisplayPower(false) // turn the phone's own panel off (it stays awake → dash keeps rendering)
-        startPanelOffRetries()
-        Log.i(TAG, "promoted $component to display $displayId")
+        // Always keep the DASH display group alive — userActivity(displayId) pokes only that group, so
+        // the dash keeps rendering when the phone screen is off/locked WITHOUT touching the phone.
+        startHeartbeat()
+        if (managePower) {
+            // Default mode: also turn the phone's own panel off to save power (device stays awake via
+            // the heartbeat, so the dash keeps rendering).
+            setMainDisplayPower(false)
+            startPanelOffRetries()
+        }
+        Log.i(TAG, "promoted $component to display $displayId (managePower=$managePower)")
     }
 
     /**
@@ -595,8 +638,10 @@ object DashServer {
         capturing = false
         stopPanelOffRetries()
         stopHeartbeat()
-        wakeDisplay(0) // requestDisplayPower(ON) cannot restore a still-dozing power group by itself
-        setMainDisplayPower(true) // restore the phone's panel
+        if (managePower) {
+            wakeDisplay(0) // requestDisplayPower(ON) cannot restore a still-dozing power group by itself
+            setMainDisplayPower(true) // restore the phone's panel (only if we turned it off)
+        }
         latestJpeg = null
         lastComponent?.let { relocateApp(it, 0) } // move the task back to the phone's own display
         Log.i(TAG, "demoted to phone")

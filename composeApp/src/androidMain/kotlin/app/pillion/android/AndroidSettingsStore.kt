@@ -36,10 +36,17 @@ class AndroidSettingsStore(context: Context) : SettingsStore {
         prefs.edit().putString(KEY_BIKE, id).apply()
     }
 
+    override fun dashApp(): String? = prefs.getString(KEY_DASH_APP, null)
+
+    override fun setDashApp(component: String?) {
+        prefs.edit().apply { if (component == null) remove(KEY_DASH_APP) else putString(KEY_DASH_APP, component) }.apply()
+    }
+
     private companion object {
         const val KEY_THEME = "theme_mode"
         const val KEY_DASH_ENABLED = "dash_enabled"
         const val KEY_DASH_RESOLUTION = "dash_resolution"
         const val KEY_BIKE = "selected_bike_id"
+        const val KEY_DASH_APP = "dash_app"
     }
 }

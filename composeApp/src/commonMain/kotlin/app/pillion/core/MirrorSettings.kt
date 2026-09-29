@@ -11,4 +11,10 @@ data class MirrorSettings(
     val quality: Int = 40,
     val maxFps: Int = 15,
     val dashResolution: DashResolution = DashResolution.DEFAULT,
+    /**
+     * When set (flattened launcher component), the session runs **dash-only pinned**: it renders this
+     * one app in landscape on the dedicated dash display and keeps it there regardless of what the
+     * phone does — no mirroring, no MediaProjection. Null → normal mirror(/promote) behaviour.
+     */
+    val dashApp: String? = null,
 )

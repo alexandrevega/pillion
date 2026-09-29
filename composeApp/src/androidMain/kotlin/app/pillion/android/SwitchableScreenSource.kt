@@ -35,6 +35,7 @@ class SwitchableScreenSource(
         dash.resizeOutput(width, height)
     }
 
+
     /** Phone locked: promote the foreground app to the dash and stream it. */
     fun promote(component: String) {
         dash.promote(component)
