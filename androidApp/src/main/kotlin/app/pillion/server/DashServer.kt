@@ -17,11 +17,13 @@ import android.os.Looper
 import android.util.Log
 import android.view.Surface
 import java.io.BufferedOutputStream
+import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.MessageDigest
 
 /**
  * Privileged helper for the dedicated-dash feature, run as the **shell uid** via `app_process`
@@ -42,13 +44,20 @@ import java.net.Socket
  * Status/diagnostics go to **logcat** (tag [TAG]).
  *
  * Launch detached so it outlives the spawning ADB connection:
- *   CLASSPATH=<base.apk> nohup app_process / app.pillion.server.DashServer \
+ *   PILLION_DASH_TOKEN=<secret> CLASSPATH=<base.apk> nohup app_process / app.pillion.server.DashServer \
  *     <virtual-w> <virtual-h> <dpi> <quality> <output-w> <output-h> <component> &
  */
 object DashServer {
 
     private const val TAG = "PillionDash"
     const val PORT = 28115 // loopback frame port (app connects to 127.0.0.1:PORT)
+    /** Env var carrying the per-spawn secret every client must present (see [authenticate]). */
+    const val TOKEN_ENV = "PILLION_DASH_TOKEN"
+    private const val AUTH_TIMEOUT_MS = 2_000
+
+    // Any app can connect to a loopback port, so only a client that knows this secret may read frames
+    // or send commands. Null only when launched by hand without the env var (dev/testing).
+    @Volatile private var authToken: String? = null
 
     // Public flags exist on DisplayManager; the trusted/own-group/always-unlocked ones are @hide,
     // so use their raw bit values (matched exactly to scrcpy's NewDisplayCapture on Android 14+).
@@ -104,6 +113,8 @@ object DashServer {
     @JvmStatic
     fun main(args: Array<String>) {
         if (Looper.myLooper() == null) Looper.prepareMainLooper()
+        authToken = System.getenv(TOKEN_ENV)?.takeIf { it.isNotEmpty() }
+        if (authToken == null) Log.w(TAG, "no $TOKEN_ENV set: accepting unauthenticated clients")
 
         virtualWidth = args.getOrNull(0)?.toIntOrNull() ?: 480
         virtualHeight = args.getOrNull(1)?.toIntOrNull() ?: 240
@@ -194,8 +205,13 @@ object DashServer {
     }
 
     private fun serveClient(client: Socket) {
+        val input = runCatching { authenticate(client) }.getOrNull()
+        if (input == null) {
+            runCatching { client.close() }
+            return
+        }
         // Reverse channel: the app sends "PROMOTE <component>" on screen-off and "DEMOTE" on unlock.
-        Thread { readCommands(client) }.apply { isDaemon = true; start() }
+        Thread { readCommands(client, input) }.apply { isDaemon = true; start() }
         try {
             client.tcpNoDelay = true
             val out = DataOutputStream(BufferedOutputStream(client.getOutputStream()))
@@ -219,9 +235,31 @@ object DashServer {
         }
     }
 
-    private fun readCommands(client: Socket) {
+    /**
+     * The client's first line must be `AUTH <token>`; on success we reply `OK\n` before any frame and
+     * hand back the reader (it may already hold buffered commands). Anything else is dropped unread.
+     */
+    // ponytail: bearer token over loopback. A process squatting PORT before the helper binds could
+    // capture it; upgrade to an HMAC challenge-response if that ever matters.
+    private fun authenticate(client: Socket): BufferedReader? {
+        client.soTimeout = AUTH_TIMEOUT_MS
+        val input = client.getInputStream().bufferedReader()
+        val line = input.readLine()?.trim() ?: return null
+        val expected = authToken
+        if (expected != null) {
+            val given = if (line.startsWith("AUTH ")) line.removePrefix("AUTH ").trim() else ""
+            if (!MessageDigest.isEqual(given.toByteArray(), expected.toByteArray())) {
+                Log.w(TAG, "rejected client without a valid token")
+                return null
+            }
+        }
+        client.soTimeout = 0
+        client.getOutputStream().apply { write("OK\n".toByteArray()); flush() }
+        return input
+    }
+
+    private fun readCommands(client: Socket, input: BufferedReader) {
         try {
-            val input = client.getInputStream().bufferedReader()
             while (true) {
                 val line = input.readLine()?.trim() ?: break
                 when {

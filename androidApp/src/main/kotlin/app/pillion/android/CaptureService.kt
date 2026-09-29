@@ -103,7 +103,7 @@ class CaptureService : Service() {
         runCatching { mirror.start() }
 
         val source: ScreenSource = if (dashEnabled) {
-            val switch = SwitchableScreenSource(mirror, DashStreamScreenSource())
+            val switch = SwitchableScreenSource(mirror, DashStreamScreenSource(this))
             dashSwitch = switch
             // Spawn or reuse the helper. Starting it needs Wireless Debugging, but an already-running
             // helper serves over loopback and survives Wi-Fi loss.
