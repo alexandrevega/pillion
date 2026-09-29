@@ -291,13 +291,13 @@ Send each frame as **`IMAGE_FRAME_UPDATE` (service 0, `POINTER`)**:
  offset  size  field
    0      1    imageType   observed 3 = expanded navigation view
    1      2    sequence    uint16, little-endian, increments per frame
-   3    var    jpeg        baseline JPEG, 480 × 240 or 480 × 236
+   3    var    jpeg        baseline JPEG, 480 × 240 (MT-class) or 480 × 234 (XMAX/NMAX scooter CCU)
 ```
 
 The dash decodes the JPEG and replies **`IMAGE_ACK` (80)**. The sender waits for the ack (skipping any
 other frames that arrive) before sending the next image, which naturally paces throughput.
 
-- **Resolution:** 480 × 240 or 480 × 236.
+- **Resolution:** 480 × 240 (MT-class) or 480 × 234 (XMAX/NMAX scooter CCU).
 - **Throughput:** roughly **14–15 fps** at JPEG quality ≈ 40 on a fast phone over Bluetooth; higher
   quality → larger frames → fewer fps. The frame rate emerges from encode + Bluetooth throughput; it
   is not commanded.

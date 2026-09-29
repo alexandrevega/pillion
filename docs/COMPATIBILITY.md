@@ -17,6 +17,12 @@ Reported working by the community so far:
 | **MT-09 (2024)** | Galaxy A52 / Android 14 | ✅ | ~12 | @mxtt |
 | **MT-09 SP (2026)** | Android | ✅ | — | @raccoon_builds |
 | **XSR900 (2025)** | Pixel 9 Pro / Android 16 | ✅ | ~11–12 | @Turbobrallan |
+| **XMAX (2025)** | Galaxy Z Flip5 / Android 15 | ✅ | ~14 | contributor |
+
+> **Scooter CCU note.** The XMAX / NMAX scooter CCU (part number `006-B3952-xx`) renders navigation
+> at **480×234**, not the 480×240 the MT-class dashes use. Pillion now detects this from the CCU
+> part number during the handshake and sizes frames automatically — sending 480×240 was what made
+> these dashes show "Connection Error" on entering navigation (issue #7).
 
 ## Very likely compatible
 
@@ -27,7 +33,7 @@ example:
 - Tracer 9 GT+
 - Niken GT
 - TMAX
-- XMAX
+- NMAX (same scooter CCU as the XMAX)
 
 **More reports welcome.** If you've tried Pillion on your bike — working or not — please open an
 [issue](../../issues) or post in the [Discord](https://discord.gg/mxNV97QUnB) with your model, phone

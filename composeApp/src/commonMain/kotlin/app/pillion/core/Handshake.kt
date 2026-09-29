@@ -15,17 +15,20 @@ class Handshake(
     private val channel: ByteChannel,
     private val reader: FrameReader,
 ) {
-    fun perform() {
+    /** @return the dash image size resolved from the CCU part number (see [NaviLiteDisplay]). */
+    fun perform(): DashSize {
         Logger.d("handshake: waiting for ESN_UPDATE")
         awaitService(ServiceType.ESN_UPDATE)
         send(ServiceType.ESN_ACK, PDT_VALUE, byteArrayOf(1, 0))
         send(ServiceType.AUTH_REQUEST, PDT_POINTER, AUTH_REQUEST_PAYLOAD)
         Logger.d("handshake: waiting for SEC_DATA")
         val secData = awaitService(ServiceType.SEC_DATA)
-        Logger.d("handshake: SEC_DATA part=${Auth.partNumber(secData.payload)}")
+        val partNumber = Auth.partNumber(secData.payload)
+        Logger.d("handshake: SEC_DATA part=$partNumber")
         send(ServiceType.SEC_DATA_ACK, PDT_POINTER, Auth.secDataAckPayload(secData.payload))
         for ((svc, pdt, payload) in SETUP_BURST) send(svc, pdt, payload)
         Logger.d("handshake: setup burst sent, authenticated")
+        return NaviLiteDisplay.forCcuPartNumber(partNumber)
     }
 
     private fun awaitService(serviceType: Int): NaviFrameView {
