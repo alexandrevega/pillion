@@ -29,7 +29,9 @@ The single most useful contribution. Open an issue with:
 
 ## Project structure
 
-Kotlin Multiplatform + Compose Multiplatform. The app module is `composeApp`:
+Kotlin Multiplatform + Compose Multiplatform. `composeApp` is the shared KMP library; `androidApp`
+is the installable Android application module (split out for AGP 9's KMP library plugin —
+`com.android.application` can no longer live in the same module as `kotlin.multiplatform`):
 
 ```
 composeApp/src/
@@ -37,8 +39,14 @@ composeApp/src/
     protocol/   # NaviLite framing, CRC-32/MPEG-2, auth   (see docs/PROTOCOL.md)
     core/       # ByteChannel / ScreenSource abstractions, MirrorEngine, Handshake
     ui/         # Compose UI
-  androidMain/  # Android actuals: RFCOMM transport, MediaProjection capture, service
+  androidMain/  # Android actuals only (expect/actual impls): Platform, AppInfo, Logger, BackHandler
+  iosMain/      # iOS actuals
   commonTest/   # protocol unit tests (CRC + captured auth vectors)
+
+androidApp/src/main/
+  kotlin/       # MainActivity, Application class, services (capture, SDL), ADB pairing, dash server
+  AndroidManifest.xml
+  res/          # launcher icons and other app-level resources
 ```
 
 The shared code knows nothing about Android — platform pieces are injected through the `ByteChannel`
@@ -48,8 +56,8 @@ with **no** change to the protocol, engine, or UI.
 ## Building & testing
 
 ```bash
-./gradlew :composeApp:assembleDebug         # build the APK
-./gradlew :composeApp:testDebugUnitTest     # run protocol unit tests
+./gradlew :androidApp:assembleDebug          # build the APK
+./gradlew :composeApp:testAndroidHostTest    # run protocol unit tests
 ```
 
 Requires the Android SDK + JDK 17 (or Android Studio). Create a `local.properties` with
@@ -67,6 +75,6 @@ Requires the Android SDK + JDK 17 (or Android Studio). Create a `local.propertie
 
 - Keep PRs focused and small where possible; describe what you changed and how you tested it (bench
   fps, on which bike if relevant).
-- Make sure `:composeApp:testDebugUnitTest` passes.
+- Make sure `:composeApp:testAndroidHostTest` passes.
 - **Commit messages use [Conventional Commits](https://www.conventionalcommits.org/)**, e.g.
   `feat(android): …`, `fix(protocol): …`, `docs: …`, `chore: …`, `refactor(core): …`.

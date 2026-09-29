@@ -1,6 +1,7 @@
 # --- Build outputs ---
 *.iml
 .gradle/
+.kotlin/
 build/
 android/build/
 android/app/build/

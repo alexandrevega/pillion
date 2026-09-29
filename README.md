@@ -83,14 +83,14 @@ The full wire spec is documented in **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
 
 ## Build from source
 
-A Kotlin Multiplatform + Compose Multiplatform project; the Android app module is `composeApp`.
+A Kotlin Multiplatform + Compose Multiplatform project; the shared code is in `composeApp` and the Android app in `androidApp`.
 Requires the Android SDK + JDK 17 (or just Android Studio).
 
 ```bash
 git clone https://github.com/alexandrevega/pillion.git
 cd pillion
-./gradlew :composeApp:assembleDebug   # -> composeApp/build/outputs/apk/debug/composeApp-debug.apk
-./gradlew :composeApp:testDebugUnitTest   # protocol unit tests (CRC + auth vectors)
+./gradlew :androidApp:assembleDebug   # -> androidApp/build/outputs/apk/debug/
+./gradlew :composeApp:testAndroidHostTest   # protocol unit tests (CRC + auth vectors)
 ```
 
 Or open the project in Android Studio and Run. The shared protocol/engine lives in
