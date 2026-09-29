@@ -47,6 +47,7 @@ class MirrorEngine(
                 // terminate it when the phone locks — HCI peer-terminated), which breaks the RFCOMM
                 // write mid-stream. Rather than failing the whole session, re-open + re-handshake and
                 // resume, so a drop is a brief reconnect instead of a dead session. Only stop() ends it.
+                var connectedOnce = false
                 while (running) {
                     try {
                         _state.value = MirrorState.Connecting
@@ -57,11 +58,13 @@ class MirrorEngine(
                         val dashSize = Handshake(channel, reader).perform()
                         Logger.d("session: dash size ${dashSize.width}x${dashSize.height}")
                         screen.resizeOutput(dashSize.width, dashSize.height)
+                        connectedOnce = true
                         seq = 1 // fresh sequence per (re)connect, matching a new session
                         Logger.d("session: streaming")
                         streamLoop(reader)
                     } catch (t: Throwable) {
                         if (!running) break
+                        if (!connectedOnce) throw t // initial connect failed: surface Error, don't retry forever
                         Logger.e("session dropped; reconnecting in ${RECONNECT_DELAY_MS}ms", t)
                         runCatching { channel.close() }
                         sleepMs(RECONNECT_DELAY_MS)
