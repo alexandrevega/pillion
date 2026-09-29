@@ -42,6 +42,8 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var latestOrient = CGImagePropertyOrientation.up
     private var running = false
     private var seq = 1
+    // Set in handshake() and read in pushLoop()/encode(), both on the same connection thread: no lock.
+    private var dash = NaviLite.defaultDashSize
     // Live settings, read from the App Group at broadcastStarted (default until then).
     private var sendInterval = 1.0 / Double(BroadcastConfig.maxFps)
     private var jpegQuality = 0.4
@@ -82,6 +84,9 @@ class SampleHandler: RPBroadcastSampleHandler {
         conn.write(NaviLite.frame(6, 33, 1, NaviLite.hexB("1c07000100000000")))
         f = try conn.readFrame(timeout: 12); while f.svc != 83 { f = try conn.readFrame(timeout: 12) }
         conn.write(NaviLite.frame(6, 84, 1, NaviLite.secDataAckPayload(f.payload)))
+        let ccu = NaviLite.partNumber(f.payload)
+        dash = NaviLite.dashSize(ccuPartNumber: ccu)
+        extLog("PillionExt: CCU \(ccu) — dash \(Int(dash.width))x\(Int(dash.height))")
         let setup: [(UInt8, UInt8, [UInt8])] = [
             (2, 0, [0, 0]), (31, 0, [1, 0]), (10, 0, [0, 0]), (11, 0, [0, 0]), (13, 0, [1, 0]), (12, 0, [0, 0]),
             (14, 1, NaviLite.hexB("07190600302e32206d69")), (3, 1, []), (17, 1, NaviLite.hexB("00000000036d7068")),
@@ -191,16 +196,17 @@ class SampleHandler: RPBroadcastSampleHandler {
     private func encode(_ pb: CVPixelBuffer, _ orient: CGImagePropertyOrientation,
                         quality: Double, detail: CGFloat = 1.0) -> [UInt8]? {
         autoreleasepool {
+            let w = dash.width, h = dash.height
             let img = CIImage(cvPixelBuffer: pb).oriented(orient)
             let e = img.extent
             // Aspect-FIT (letterbox): whole screen centred on the 480×240 panel with black bars.
-            let scale = min(480.0 / e.width, 240.0 / e.height)
+            let scale = min(w / e.width, h / e.height)
             let s = img.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             let se = s.extent
-            let tx = (480 - se.width) / 2 - se.origin.x
-            let ty = (240 - se.height) / 2 - se.origin.y
+            let tx = (w - se.width) / 2 - se.origin.x
+            let ty = (h - se.height) / 2 - se.origin.y
             let centered = s.transformed(by: CGAffineTransform(translationX: tx, y: ty))
-            let canvas = CGRect(x: 0, y: 0, width: 480, height: 240)
+            let canvas = CGRect(x: 0, y: 0, width: w, height: h)
             var cropped = centered.composited(over: CIImage(color: .black).cropped(to: canvas)).cropped(to: canvas)
             if detail < 1.0 {
                 // Soften via Lanczos down + up on the final 480×240: kills the high-frequency map
