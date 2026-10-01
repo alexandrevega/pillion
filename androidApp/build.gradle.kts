@@ -75,4 +75,6 @@ dependencies {
     implementation(libs.conscrypt.android)
     // SDL "Path B": USB/AOA full-motion H.264 to USB head units (Tracer etc.).
     implementation(libs.smartdevicelink.android)
+    // sdl_android drags in fragment 1.2.0, which breaks the ActivityResult API (and fails release lint).
+    implementation(libs.androidx.fragment)
 }
