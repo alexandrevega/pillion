@@ -19,6 +19,8 @@ targets:
     platform: iOS
     sources:
       - path: iosApp
+      - path: Shared
+        includes: [AppGroup.swift, DebugLog.swift]   # the rest of Shared is extension-only
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig

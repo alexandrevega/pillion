@@ -1,6 +1,8 @@
 import Foundation
 import Darwin
 
+#if DEBUG
+
 /// The dev transport: streams NaviLite to the emulator (`receiver.py` TCP dash) over a plain socket.
 /// Used by the broadcast extension when no bike accessory is connected — same role as the app's
 /// Kotlin `NetworkByteChannel`, so the whole stack can be tested without the bike.
@@ -13,6 +15,7 @@ final class TCPConn: DashConn {
     private var fd: Int32 = -1
     private var inBuf = [UInt8]()
     var logger: ((String) -> Void)?
+    var isClosed: Bool { fd < 0 }
 
     init(host: String, port: UInt16) { self.host = host; self.port = port }
 
@@ -76,3 +79,4 @@ final class TCPConn: DashConn {
 
     private func err(_ s: String) -> NSError { NSError(domain: "TCPConn", code: 1, userInfo: [NSLocalizedDescriptionKey: s]) }
 }
+#endif

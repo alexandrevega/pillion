@@ -9,7 +9,10 @@ final class EAConn: NSObject, StreamDelegate, DashConn {
     private var input: InputStream?
     private var output: OutputStream?
     private weak var streamThread: Thread?
+    private let ioDone = DispatchSemaphore(value: 0)   // signalled when the ea-io thread has torn its streams down
     private let cond = NSCondition()
+    private var closed = false                          // guarded by `cond`; set on close() or a stream end/error
+    private var tornDown = false                        // guarded by `cond`; close() body runs once
     private var inBuf = Data()
     private let outLock = NSLock()
     private var outQueue = Data()
@@ -18,13 +21,11 @@ final class EAConn: NSObject, StreamDelegate, DashConn {
     func connect() throws {
         let mgr = EAAccessoryManager.shared()
         let accs = mgr.connectedAccessories
-        logger?("connected accessories: \(accs.count)")
-        for a in accs { logger?(" • \(a.name)  protocols=\(a.protocolStrings)") }
         guard let acc = accs.first(where: { $0.protocolStrings.contains(BroadcastConfig.dashProtocol) }) else {
             throw err("CCU not found (no accessory advertising \(BroadcastConfig.dashProtocol)). Pair the bike + select NAV mode.")
         }
         guard let s = EASession(accessory: acc, forProtocol: BroadcastConfig.dashProtocol) else {
-            throw err("EASession creation failed (protocol rejected by accessory?)")
+            throw err("could not open the bike session — another app (e.g. StreetCross) may be holding it; force-quit it")
         }
         session = s; input = s.inputStream; output = s.outputStream
         let t = Thread { [weak self] in
@@ -33,7 +34,13 @@ final class EAConn: NSObject, StreamDelegate, DashConn {
             inp.schedule(in: .current, forMode: .default)
             outp.schedule(in: .current, forMode: .default)
             inp.open(); outp.open()
-            RunLoop.current.run()
+            // Short slices instead of run(): close() just sets `closed` and this thread winds itself down.
+            while !self.isClosed { RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.25)) }
+            inp.remove(from: .current, forMode: .default)
+            outp.remove(from: .current, forMode: .default)
+            inp.delegate = nil; outp.delegate = nil
+            inp.close(); outp.close()
+            self.ioDone.signal()
         }
         t.name = "ea-io"; t.start(); streamThread = t
         logger?("EASession opened for \(BroadcastConfig.dashProtocol)")
@@ -51,8 +58,10 @@ final class EAConn: NSObject, StreamDelegate, DashConn {
             flush()
         case .errorOccurred:
             logger?("stream error: \(s.streamError?.localizedDescription ?? "?")")
+            markClosed()
         case .endEncountered:
             logger?("stream end")
+            markClosed()
         default: break
         }
     }
@@ -69,19 +78,34 @@ final class EAConn: NSObject, StreamDelegate, DashConn {
         outLock.unlock()
     }
 
+    var isClosed: Bool { cond.lock(); defer { cond.unlock() }; return closed }
+
+    /// The link is dead: wake any reader so it throws instead of waiting out its timeout.
+    private func markClosed() { cond.lock(); closed = true; cond.broadcast(); cond.unlock() }
+
     func write(_ bytes: [UInt8]) {
         outLock.lock(); outQueue.append(contentsOf: bytes); outLock.unlock()
         if let t = streamThread { perform(#selector(flush), on: t, with: nil, waitUntilDone: false) }
     }
 
+    /// Fully tears down: stops the ea-io thread (which closes + unschedules the streams) and drops the session.
+    /// Safe to call more than once, and on a connection whose `connect()` failed.
     func close() {
-        input?.close(); output?.close(); session = nil
+        cond.lock(); let first = !tornDown; tornDown = true; cond.unlock()
+        guard first else { return }   // loop thread and broadcastFinished may both close
+        markClosed()
+        if streamThread != nil { _ = ioDone.wait(timeout: .now() + 2) }
+        streamThread = nil; input = nil; output = nil; session = nil
     }
 
     private func readBytes(_ n: Int, timeout: TimeInterval) throws -> [UInt8] {
         cond.lock(); defer { cond.unlock() }
         let deadline = Date().addingTimeInterval(timeout)
-        while inBuf.count < n { if !cond.wait(until: deadline) { throw err("read timeout") } }
+        while true {
+            if closed { throw err("link closed") }
+            if inBuf.count >= n { break }
+            if !cond.wait(until: deadline) { throw err("read timeout") }
+        }
         let out = Array(inBuf.prefix(n)); inBuf.removeFirst(n); return out
     }
 
