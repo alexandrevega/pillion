@@ -10,7 +10,10 @@ import os.log
 /// Extension logging that survives `log collect`: NSLog content is privacy-redacted (<private>) in
 /// collected archives, so use os_log with %{public} to keep the FPS/ack stats readable.
 private let extOSLog = OSLog(subsystem: "app.pillion.ext", category: "stream")
-func extLog(_ s: String) { os_log("%{public}@", log: extOSLog, type: .default, s) }
+func extLog(_ s: String) {
+    os_log("%{public}@", log: extOSLog, type: .default, s)
+    DebugLog.append(s)   // also to the shareable file in the App Group (no-op without a group)
+}
 
 /// Darwin notification names the app observes to reflect broadcast state (no App Group needed).
 enum BroadcastSignal {
@@ -25,7 +28,8 @@ enum BroadcastSignal {
 
 /// Broadcast Upload Extension: captures the whole screen system-wide and streams it to the dash as
 /// NaviLite. Because it runs as a broadcast it keeps going while the phone is in Waze/Maps. Ported
-/// from rickdash-ios; picks the bike (External Accessory) when present, else the dev emulator (TCP).
+/// from rickdash-ios; streams to the bike (External Accessory), waiting for it and reconnecting as needed
+/// (Debug builds fall back to the dev emulator over TCP).
 class SampleHandler: RPBroadcastSampleHandler {
     private var conn: DashConn!
     // Force an explicit Metal-backed context so the downscale runs on the GPU. The capture thread only
@@ -53,28 +57,59 @@ class SampleHandler: RPBroadcastSampleHandler {
         // Pull the user's live Settings (fps / quality) from the App Group.
         sendInterval = 1.0 / Double(BroadcastConfig.liveMaxFps())
         jpegQuality = BroadcastConfig.liveJpegQuality()
+        DebugLog.rotate(header: logHeader())
         extLog("PillionExt: settings — fps=\(BroadcastConfig.liveMaxFps()) quality=\(jpegQuality)")
         BroadcastSignal.post(BroadcastSignal.started)
-        // Enumerate EVERY connected MFi accessory up front so a bike test is diagnosable even when the
-        // protocol string doesn't match (otherwise we silently fall back to TCP and learn nothing about
-        // what the CCU actually advertises). iOS only exposes MFi accessories here — if the bike isn't
-        // listed at all, it isn't pairing as an External Accessory and the EA path can't work.
-        let accs = EAAccessoryManager.shared().connectedAccessories
-        extLog("PillionExt: \(accs.count) connected accessory(ies)")
-        for a in accs { extLog("PillionExt:  • \(a.name) — protocols=\(a.protocolStrings)") }
-        let hasBike = accs.contains { $0.protocolStrings.contains(BroadcastConfig.dashProtocol) }
-        let c: DashConn = hasBike ? EAConn()
-                                  : TCPConn(host: BroadcastConfig.emulatorHost, port: BroadcastConfig.emulatorPort)
-        c.logger = { s in extLog("PillionExt: \(s)") }
-        conn = c
-        extLog("PillionExt: transport = \(hasBike ? "bike (External Accessory)" : "emulator (TCP)")")
-        Thread.detachNewThread { [weak self] in
-            guard let self = self else { return }
+        Thread.detachNewThread { [weak self] in self?.sessionLoop() }
+    }
+
+    /// First line of the shareable log: what build, what device, and whether the App Group resolved.
+    private func logHeader() -> String {
+        let info = AppGroup.appInfo
+        var u = utsname(); uname(&u)
+        let model = withUnsafeBytes(of: &u.machine) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
+        let group = AppGroup.id.map { "resolved \($0)" } ?? "UNAVAILABLE (tried \(AppGroup.candidates))"
+        return "Pillion \(info["CFBundleShortVersionString"] ?? "?") (\(info["CFBundleVersion"] ?? "?")) — "
+            + "\(ProcessInfo.processInfo.operatingSystemVersionString) — \(model) — "
+            + "maxFps=\(BroadcastConfig.liveMaxFps()) quality=\(BroadcastConfig.liveJpegQuality()) — app group \(group)"
+    }
+
+    /// Like Android's MirrorEngine reconnect loop: pick a transport → connect → handshake → stream, and on any
+    /// failure close cleanly, wait, and go again until the broadcast ends. Runs on one detached thread.
+    private func sessionLoop() {
+        var lastList = ""
+        var lastTransport = ""
+        while running {
+            let accs = EAAccessoryManager.shared().connectedAccessories
+            let list = accs.map { "\($0.name) \($0.protocolStrings)" }.joined(separator: "; ")
+            if list != lastList { lastList = list; extLog("PillionExt: \(accs.count) accessory(ies): \(list)") }
+            var c: DashConn?
+            var transport = "bike (External Accessory)"
+            if accs.contains(where: { $0.protocolStrings.contains(BroadcastConfig.dashProtocol) }) {
+                c = EAConn()
+            }
+            #if DEBUG
+            if c == nil {
+                c = TCPConn(host: BroadcastConfig.emulatorHost, port: BroadcastConfig.emulatorPort)
+                transport = "emulator (TCP)"
+            }
+            #endif
+            guard let next = c else {
+                if lastTransport != "waiting" { lastTransport = "waiting"; extLog("PillionExt: waiting for bike") }
+                Thread.sleep(forTimeInterval: 1)
+                continue
+            }
+            if transport != lastTransport { lastTransport = transport; extLog("PillionExt: transport = \(transport)") }
+            next.logger = { s in extLog("PillionExt: \(s)") }
+            conn = next
+            seq = 1
             do {
-                try self.conn.connect()
-                try self.handshake()
-                self.pushLoop()
-            } catch { extLog("PillionExt connect err: \((error as NSError).localizedDescription)") }
+                try next.connect()
+                try handshake()
+                pushLoop()
+            } catch { extLog("PillionExt session err: \((error as NSError).localizedDescription)") }
+            next.close()
+            if running { extLog("PillionExt: session ended — retrying"); Thread.sleep(forTimeInterval: 1.5) }
         }
     }
 
@@ -122,6 +157,7 @@ class SampleHandler: RPBroadcastSampleHandler {
         var detail: CGFloat = 1.0
         var lastSentPB: CVPixelBuffer?
         var inFlight: [Date] = []   // send timestamps of un-ACKed frames (FIFO, ≤2)
+        var lastAck = Date()        // dead-link watchdog: no ACK for 5s while frames are going out
         // Applies one measured ACK time to the two-stage controller: shed JPEG quality first; once
         // at the floor, shed detail (soft beats blocky on a map). Recover in reverse. Thresholds
         // are wider than stop-and-wait's because a windowed ACK includes overlap with the previous
@@ -136,6 +172,7 @@ class SampleHandler: RPBroadcastSampleHandler {
             ackTotal += ackS
         }
         while running {
+            if conn.isClosed { extLog("PillionExt: link closed"); return }
             let wait = sendInterval - Date().timeIntervalSince(lastSend)
             if wait > 0 { usleep(UInt32(wait * 1_000_000)) }
             lock.lock(); let pb = latestPixels; let o = latestOrient; lock.unlock()
@@ -149,6 +186,7 @@ class SampleHandler: RPBroadcastSampleHandler {
             // Window gate: block only when 2 frames are already un-ACKed.
             while running && inFlight.count >= 2 {
                 if awaitAck(1.0) {
+                    lastAck = Date()
                     steer(Date().timeIntervalSince(inFlight.removeFirst()))
                 } else {
                     // Timeout: dash silent or ACK lost. Drain any stragglers and reset the window
@@ -156,9 +194,14 @@ class SampleHandler: RPBroadcastSampleHandler {
                     while awaitAck(0.05) {}
                     inFlight.removeAll()
                     steer(1.0)
+                    if conn.isClosed || Date().timeIntervalSince(lastAck) > 5 {
+                        extLog("PillionExt: no IMAGE_ACK for 5s — link dead"); return
+                    }
                 }
             }
             if !running { break }
+            // Idle gap (static screen / no frames yet): the old ACK time says nothing about the link.
+            if inFlight.isEmpty && Date().timeIntervalSince(lastSend) > 3 { lastAck = Date() }
             lastSend = Date()
             lastSentPB = pb
             var pl: [UInt8] = [3, UInt8(seq & 0xff), UInt8((seq >> 8) & 0xff)]; pl.append(contentsOf: jpg); seq += 1
