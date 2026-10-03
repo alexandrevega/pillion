@@ -18,6 +18,7 @@ import platform.UIKit.UIViewController
 fun MainViewController(
     naviliteController: MirrorController,
     sdlController: MirrorController?,
+    onShareDebugLog: (() -> Unit)? = null,
 ): UIViewController {
     registerBuiltInHeadUnits()
     return ComposeUIViewController {
@@ -31,6 +32,7 @@ fun MainViewController(
             },
             updateChecker = null,
             settingsStore = IosSettingsStore(),
+            onShareDebugLog = onShareDebugLog,
         )
     }
 }
