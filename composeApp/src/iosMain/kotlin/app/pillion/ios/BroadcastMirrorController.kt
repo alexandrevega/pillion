@@ -22,13 +22,16 @@ class BroadcastMirrorController : MirrorController {
     /** Set by the Swift shell: shows the system broadcast picker (start or stop). */
     var onToggle: (() -> Unit)? = null
 
+    /** Set by the Swift shell: the resolved App Group ID (sideloaders rename it); null = none usable. */
+    var appGroup: String? = "group.app.pillion"
+
     private val _state = MutableStateFlow<MirrorState>(MirrorState.Idle)
     override val state: StateFlow<MirrorState> = _state.asStateFlow()
 
     override fun start(settings: MirrorSettings) {
         // Hand the live settings to the out-of-process broadcast extension via the shared App Group
         // (it can't read the app's own UserDefaults). The extension reads these at broadcastStarted.
-        NSUserDefaults(suiteName = APP_GROUP)?.apply {
+        appGroup?.let { NSUserDefaults(suiteName = it) }?.apply {
             setInteger(settings.maxFps.toLong(), forKey = "stream.maxFps")
             setInteger(settings.quality.toLong(), forKey = "stream.quality")
         }
@@ -36,10 +39,6 @@ class BroadcastMirrorController : MirrorController {
     }
 
     override fun stop() { onToggle?.invoke() }
-
-    private companion object {
-        const val APP_GROUP = "group.app.pillion"
-    }
 
     /** Called by the Swift shell from the extension's broadcast start/finish Darwin notifications. */
     fun setActive(active: Boolean) {

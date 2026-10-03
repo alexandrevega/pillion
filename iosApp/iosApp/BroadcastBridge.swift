@@ -27,6 +27,7 @@ final class BroadcastBridge: ObservableObject {
                 }
             }
         })
+        controller.appGroup = AppGroup.id
         controller.onToggle = { [weak self] in self?.triggerPicker() }
         self.sdlController.onStart = { [weak self] in self?.sdlSession.start() }
         self.sdlController.onStop = { [weak self] in self?.sdlSession.stop() }
@@ -34,7 +35,9 @@ final class BroadcastBridge: ObservableObject {
     }
 
     func makeViewController() -> UIViewController {
-        MainViewControllerKt.MainViewController(naviliteController: controller, sdlController: sdlController)
+        MainViewControllerKt.MainViewController(naviliteController: controller, sdlController: sdlController) {
+            DebugLogShare.present()
+        }
     }
 
     /// Called by `BroadcastPickerHost` once the (hidden) picker view exists.

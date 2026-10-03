@@ -35,6 +35,7 @@ fun App(
     updateChecker: UpdateChecker? = null,
     settingsStore: SettingsStore? = null,
     dashSetup: DashSetup? = null,
+    onShareDebugLog: (() -> Unit)? = null,
 ) {
     var themeMode by remember { mutableStateOf(settingsStore?.themeMode() ?: ThemeMode.SYSTEM) }
     PillionTheme(themeMode) {
@@ -101,6 +102,7 @@ fun App(
                 bikeName = profile.displayName,
                 onChangeBike = { showSettings = false; changingBike = true; selectedBikeId = null },
                 update = update,
+                onShareDebugLog = onShareDebugLog,
                 onBack = { showSettings = false },
             )
         } else {

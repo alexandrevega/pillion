@@ -78,6 +78,7 @@ internal fun SettingsScreen(
     bikeName: String = "",
     onChangeBike: () -> Unit = {},
     update: UpdateInfo?,
+    onShareDebugLog: (() -> Unit)? = null,
     onBack: () -> Unit,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -247,6 +248,10 @@ internal fun SettingsScreen(
             LinkRow("Source code") { uriHandler.openUri(REPO_URL) }
             GroupDivider()
             LinkRow("Report an issue") { uriHandler.openUri("$REPO_URL/issues") }
+            if (onShareDebugLog != null) {
+                GroupDivider()
+                LinkRow("Share debug log") { onShareDebugLog() }
+            }
             GroupDivider()
             LinkRow("Changelog") { uriHandler.openUri("$REPO_URL/blob/main/CHANGELOG.md") }
         }
