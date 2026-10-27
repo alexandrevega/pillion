@@ -91,7 +91,6 @@ class AndroidWifiLink(
             return
         }
         logNetwork(network)
-        logNearbyNetworks()
         val gateway = gatewayOf(network)
         Logger.d("wifi: gateway=${gateway?.hostAddress}")
 
@@ -125,17 +124,6 @@ class AndroidWifiLink(
         val legacy = runCatching { context.getSystemService(WifiManager::class.java).connectionInfo }.getOrNull()
         val wifi = info ?: legacy
         Logger.d("wifi: ssid=${wifi?.ssid} bssid=${wifi?.bssid} freq=${wifi?.frequency}MHz rssi=${wifi?.rssi}")
-    }
-
-    private fun logNearbyNetworks() {
-        runCatching {
-            val results = context.getSystemService(WifiManager::class.java).scanResults
-            Logger.d("wifi: ${results.size} nearby networks (cached scan)")
-            results.sortedByDescending { it.level }.take(30).forEach {
-                @Suppress("DEPRECATION")
-                Logger.d("wifi:   ssid='${it.SSID}' bssid=${it.BSSID} freq=${it.frequency} level=${it.level} caps=${it.capabilities}")
-            }
-        }.onFailure { Logger.d("wifi: nearby networks unavailable (${it.javaClass.simpleName}: ${it.message})") }
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)

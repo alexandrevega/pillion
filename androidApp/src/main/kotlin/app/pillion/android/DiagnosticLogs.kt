@@ -53,7 +53,6 @@ object DiagnosticLogs {
 
     // Last compact description per network, so the summary shows what was up and repeats aren't logged.
     private val networks = ConcurrentHashMap<Network, String>()
-    private val seenBssids = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var lastP2p = "(none)"
 
     /** Start the background capture. Call once from the main process only. */
@@ -99,7 +98,6 @@ object DiagnosticLogs {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 when (intent.action) {
-                    WifiManager.SCAN_RESULTS_AVAILABLE_ACTION -> logNewScanResults(context)
                     BluetoothDevice.ACTION_ACL_CONNECTED, BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
                         val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
                         val name = runCatching { device?.name }.getOrNull()
@@ -119,7 +117,6 @@ object DiagnosticLogs {
             addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
             addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
             addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION)
-            addAction(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
             addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
             addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
         }
@@ -178,15 +175,6 @@ object DiagnosticLogs {
     }
 
     /** Log each access point the first time it shows up — the bike's hotspot or Wi-Fi Direct group among them. */
-    private fun logNewScanResults(context: Context) {
-        val results = runCatching { context.getSystemService(WifiManager::class.java).scanResults }.getOrNull() ?: return
-        results.filter { seenBssids.add(it.BSSID) }.forEach {
-            @Suppress("DEPRECATION")
-            Logger.d("diag: wifi seen ssid='${it.SSID}' bssid=${it.BSSID} freq=${it.frequency} level=${it.level} caps=${it.capabilities}")
-        }
-    }
-
-    /** Build the zip and open the system share sheet (WhatsApp, email, Drive…). */
     fun share(context: Context) {
         val zip = runCatching { buildZip(context) }.getOrElse {
             Logger.e("diag: failed to build log zip", it)
@@ -253,7 +241,6 @@ object DiagnosticLogs {
         appendLine("location on=$location $granted")
         appendLine("networks up: ${networks.values.ifEmpty { listOf("none") }.joinToString(" | ")}")
         appendLine("wifi direct (last): $lastP2p")
-        appendLine("access points seen: ${seenBssids.size}")
         appendLine()
 
         appendLine("== USB ==")
