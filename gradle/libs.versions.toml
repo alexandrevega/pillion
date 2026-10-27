@@ -1,7 +1,7 @@
 [versions]
 # Single source of truth for the app's user-facing version — read by androidApp's versionName
 # and generated into composeApp's AppInfo actual (library modules have no BuildConfig).
-app-versionName = "0.2.0-alpha"
+app-versionName = "0.3.0-alpha"
 agp = "9.0.1"
 android-compileSdk = "35"
 android-minSdk = "24"

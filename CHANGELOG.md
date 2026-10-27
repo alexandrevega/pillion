@@ -6,17 +6,61 @@ All notable changes to Pillion are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0-alpha] - 2026-11-08
+
+Third alpha. Scooter dashes (XMAX/NMAX) connect, Android reconnects on its own, iOS copes with a bike that
+isn't ready yet, and testers can now send logs straight from Settings.
+
 ### Added
-- **SDL over Wi-Fi (experimental, Android).** Settings → *Wi-Fi link* lets the Motorize-compatible
-  profile connect to the dash over the bike's Wi-Fi hotspot (SDL TCP transport) instead of the USB
-  cable. It targets the hotspot's gateway on SDL's default port 12345 (verified on a Tracer 9 GT
-  (2026): registers, reaches HMI FULL and streams 640×360 H.264); the process is bound to the hotspot
-  so traffic doesn't leak to mobile data. An optional *Scan bike Wi-Fi* probes mDNS/SSDP and open
-  ports for dashes that listen elsewhere.
-- **Shareable diagnostic logs (Android).** Settings → *Share diagnostic logs* zips a rolling capture of
-  the app + SDL router logcat with a summary (USB/AOA state, accessories, installed SDL routers,
-  networks, Wi-Fi Direct) so testers without adb can send a full report.
+- **XMAX/NMAX scooter support.** Dash frames are sized per CCU so the scooter dashes connect, on Android
+  and iOS; Android's dedicated-display (dash) mode uses the same size. Thanks @backpapp (#8, #9, #10) and
+  @mrbnd (iOS size logic).
+- **Bluetooth auto-reconnect (Android).** A dropped NaviLite link reconnects by itself, but only after a
+  successful handshake so a wrong device doesn't loop. Thanks @backpapp.
+- **iOS waits for the bike and retries.** The NaviLite session waits for the bike to show up and retries
+  instead of giving up on the first failed attempt.
+- **Share debug logs.** Settings -> *Share debug logs* sends the debug log (iOS: the broadcast extension's
+  log; Android: a zip of the app + SDL router logcat with a summary of USB/AOA state, installed SDL
+  routers and networks) so testers can report problems without adb. Nearby Wi-Fi networks are never
+  logged; only the network the phone is joined to. Android part thanks @brunohorta82 (#14).
+- **SDL over Wi-Fi (experimental, Android).** Settings -> *Wi-Fi link* lets the Motorize-compatible
+  profile connect to the dash over the bike's Wi-Fi hotspot (SDL TCP transport) instead of the USB cable.
+  *Scan bike Wi-Fi* finds the dash's gateway and SDL port; the process is bound to the hotspot so traffic
+  doesn't leak to mobile data. Reported working on a Tracer 9 GT. Thanks @brunohorta82 (#14).
 - The home screen shows the selected bike/profile (and "via Wi-Fi" when that link is active).
+- **Virtual-display controls (Android).** Pin one app to the dash, with persistent app selection, DPI
+  and layout margins; system decorations are hidden and a STATUS frame shows while the dash waits for a
+  fresh image. Thanks @waiasu (#23).
+
+### Changed
+- **Dash helper requires a secret.** The privileged dash helper now only talks to callers that present
+  its per-session token, so other apps on the phone can't drive it.
+- **Faster iOS streaming.** Adaptive streaming reaches 10-12 fps on the bike link (was 1-3); NaviLite is
+  stop-and-wait on both platforms and the Android default max FPS is now 15.
+- **Build:** migrated to AGP 9.0 / the KMP library plugin with the Android app split into `androidApp`
+  (thanks @roinuj39, #6); `androidx.fragment` is pinned so release builds pass lint. Removed the inert
+  Compatibility-mode toggle.
+
+### Fixed
+- Starting a session twice (tapping Start again) no longer leaves the first mirror engine, screen capture
+  and threads running.
+- `enableTcpip` no longer hangs the ADB bootstrap for the dash helper (@backpapp).
+- **Capture, ADB and virtual-display reliability (@waiasu, #23).** RFCOMM sockets from failed connection
+  attempts are closed and the initial CCU connection retries; the ADB helper reuses an active loopback
+  transport and no longer stalls the watchdog (ANR); stopped MediaProjection sessions are released and
+  stale mirror frames are never shown; mirror and virtual-display lifecycles are separated; IMAGE_ACK
+  waits are bounded with a verified 16-bit sequence; a stalled CCU authentication recovers; and the dash
+  preserves CCU aspect ratio, gates frames on `SIZE_READY`, and coordinates phone lock/unlock and display
+  transitions. Supersedes #15, #16 and #17. Validated on a Pixel 10a + Yamaha XMAX commute.
+- iOS: Compose resources ship in the app again (fixes a crash opening Settings).
+- Host tests stub `android.util.Log`.
+
+### Known issues
+- The dash goes black when the phone locks (mirroring).
+- Pair the bike with MyRide or Y-Connect first; Pillion needs the bike already paired.
+- On Android, disable battery optimization for Pillion or the system may kill the session.
+- iPhone on XMAX / Tracer 7 GT is still being tested; if it doesn't connect, send the debug log
+  (Settings -> *Share debug logs*).
 
 ## [0.2.0-alpha] - 2026-06-28
 
