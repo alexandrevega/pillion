@@ -3,6 +3,7 @@ package app.pillion.android.sdl
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import app.pillion.core.Logger
 import com.smartdevicelink.transport.SdlBroadcastReceiver
 import com.smartdevicelink.transport.SdlRouterService as LibSdlRouterService
 
@@ -17,10 +18,16 @@ class SdlReceiver : SdlBroadcastReceiver() {
         // this the service would default to a generic appId and ping-pong against any Garmin session.
         intent.putExtra(SdlService.EXTRA_APP_ID, SdlService.APP_ID_GARMIN)
         intent.putExtra(SdlService.EXTRA_AUTO, true)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        } catch (t: Throwable) {
+            // v4 hardening: Android 12+ can throw on background FGS starts; never crash the broadcast —
+            // the user can still tap Start in-app, and the next attach retries.
+            Logger.d("sdl: receiver could not start the service: ${t.message}")
         }
     }
 

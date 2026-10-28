@@ -20,4 +20,19 @@ interface SettingsStore {
      *  or null if they haven't chosen yet (→ show the bike-selection screen). */
     fun selectedBikeId(): String?
     fun setSelectedBikeId(id: String)
+
+    /** When true (default), a USB dash connection wins over a live/possible Wi-Fi (TCP) session:
+     *  plugging in switches a running TCP session to USB, and Start with the cable in uses USB even
+     *  if an IP is typed. When false, a HEALTHY TCP session ignores the plug-in (charging/faulty-cable
+     *  safety); a dead session still rebuilds over USB. */
+    fun usbOverride(): Boolean
+    fun setUsbOverride(enabled: Boolean)
+
+    /** The bike's Wi-Fi (TCP) host typed in settings, or "" for USB-only mode. Persisted. */
+    fun tcpHost(): String
+    fun setTcpHost(host: String)
+
+    /** TCP port for Wi-Fi streaming (default 12345). Persisted. */
+    fun tcpPort(): Int
+    fun setTcpPort(port: Int)
 }

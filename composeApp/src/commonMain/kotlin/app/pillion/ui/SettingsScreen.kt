@@ -25,12 +25,14 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -67,6 +69,12 @@ internal fun SettingsScreen(
     onQuality: (Int) -> Unit,
     maxFps: Int,
     onMaxFps: (Int) -> Unit,
+    tcpHost: String = "",
+    onTcpHost: (String) -> Unit = {},
+    tcpPortText: String = "12345",
+    onTcpPortText: (String) -> Unit = {},
+    usbOverride: Boolean = true,
+    onUsbOverride: (Boolean) -> Unit = {},
     themeMode: ThemeMode,
     onThemeMode: (ThemeMode) -> Unit,
     dashSupported: Boolean = false,
@@ -188,7 +196,51 @@ internal fun SettingsScreen(
         SettingsGroup {
             SettingSlider("Image quality", "$quality", quality.toFloat(), 10f, 80f) { onQuality(it.roundToInt()) }
             GroupDivider()
-            SettingSlider("Max frame rate", "$maxFps fps", maxFps.toFloat(), 5f, 30f) { onMaxFps(it.roundToInt()) }
+            SettingSlider("Max frame rate", "${maxFps} fps", maxFps.toFloat(), 5f, 30f) { onMaxFps(it.roundToInt()) }
+            GroupDivider()
+            Text(
+                "Wireless streaming (TCP)",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            OutlinedTextField(
+                value = tcpHost,
+                onValueChange = onTcpHost,
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Bike IP — blank = USB only") },
+                singleLine = true,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = tcpPortText,
+                onValueChange = onTcpPortText,
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("TCP port") },
+                singleLine = true,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = usbOverride, onCheckedChange = onUsbOverride)
+                Text(
+                    "USB overrides Wi-Fi",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Text(
+                "On: plugging the USB cable into the bike switches a live Wi-Fi session to USB, and " +
+                    "USB wins even when an IP is typed. Off: a healthy Wi-Fi session keeps going and " +
+                    "the cable is ignored (charging or flaky cable); a dead session still recovers over USB.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Blank IP = USB only: Pillion waits for the bike cable. Type the bike's IP for Wi-Fi " +
+                    "streaming, or 'auto' to scan the network once.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         Text(
             "Higher quality looks sharper but makes the picture less smooth (about 15–25 fps at 40% " +

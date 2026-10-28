@@ -6,6 +6,33 @@ All notable changes to Pillion are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0-alpha] - unreleased
+
+Third alpha. The SDL path grows a **Wi-Fi transport with auto-discovery**, self-heals its sessions, and
+fixes the projection lifecycle on Android 14 and 15.
+
+### Added
+- **SDL over Wi-Fi (TCP).** MirrorSettings + Settings UI expose the bike's IP/port; a blank/"auto" IP arms
+  automatic transport selection, and a **USB-priority toggle** (default ON) moves a live TCP session to USB
+  the moment the cable is attached.
+- **Wi-Fi auto-discovery.** Joining a Wi-Fi network auto-discovers the SDL host (DHCP server = hotspot host,
+  `/24` sweep fallback once per network); losing Wi-Fi drops the TCP session like an unplug. New
+  `TcpDiscovery` scans the subnet for the SDL port.
+- **Persisted Bike IP/port** in settings — typed once, reused every Start; the IP field persists as-you-type.
+- **Self-healing SDL sessions.** Sessions rebuild on death (20s grace after suite reconnect), failed/hung
+  auto-starts rebuild with escalating backoff (8/24/72s, cap 10), and the video gate resets on a fresh
+  session. `HMI-NONE` tears video down after 5s and re-arms automatically.
+- Wake lock with an 8h timeout; receiver foreground-service hardening; `onDestroy` clears pending callbacks.
+- LeakCanary as a debug-only dependency.
+
+### Fixed
+- **Android 14:** the `mediaProjection` foreground-service type is now registered while *arming* capture
+  (Android refuses a later upgrade — `attemptVideoStream` threw `SecurityException`); FGS ordering fixed.
+- **Android 15:** one shared process-level virtual display per projection grant — a second
+  `createVirtualDisplay` per grant killed projection; the surface rebinds on remote-display recreation, and
+  the spent token + shared display are released on stop.
+- Memory-leak weakpoints in the SDL/video pipeline.
+
 ## [0.2.0-alpha] - 2026-06-28
 
 Second alpha. iOS joins Android, and a SOLID head-unit architecture lands so the app can drive more than
@@ -58,5 +85,6 @@ First alpha. Android-only; the shared protocol/engine is ready for an iOS target
 - No iOS build yet.
 
 [Unreleased]: https://github.com/alexandrevega/pillion/compare/v0.2.0-alpha...HEAD
+[0.3.0-alpha]: https://github.com/alexandrevega/pillion/compare/v0.2.0-alpha...HEAD
 [0.2.0-alpha]: https://github.com/alexandrevega/pillion/compare/v0.1.0-alpha...v0.2.0-alpha
 [0.1.0-alpha]: https://github.com/alexandrevega/pillion/releases/tag/v0.1.0-alpha

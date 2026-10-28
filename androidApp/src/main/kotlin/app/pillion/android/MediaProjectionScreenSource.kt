@@ -24,8 +24,10 @@ class MediaProjectionScreenSource(
     private val quality: Int = DEFAULT_QUALITY,
 ) : ScreenSource {
 
-    private val thread = HandlerThread("pillion-capture").apply { start() }
-    private val handler = Handler(thread.looper)
+    // Recreated per start(): the looper dies with stop(), so reusing a dead one would silently
+    // drop every frame posted to it.
+    private var thread: HandlerThread? = null
+    private var handler: Handler? = null
     private var reader: ImageReader? = null
     private var display: VirtualDisplay? = null
     @Volatile private var latest: Bitmap? = null
@@ -36,17 +38,19 @@ class MediaProjectionScreenSource(
 
     override fun start() {
         if (display != null) return // idempotent: capture may be pre-started by the service
-        // Android 14+ requires a registered callback before createVirtualDisplay.
+        val t = HandlerThread("pillion-capture").apply { start() }
+        val h = Handler(t.looper)
+        thread = t; handler = h
         projection.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() { Log.w(TAG, "screen: projection stopped by the system") }
-        }, handler)
+        }, h)
         val r = ImageReader.newInstance(WIDTH, HEIGHT, PixelFormat.RGBA_8888, 2)
-        r.setOnImageAvailableListener({ ir -> capture(ir) }, handler)
+        r.setOnImageAvailableListener({ ir -> capture(ir) }, h)
         reader = r
         val dpi = context.resources.displayMetrics.densityDpi
         display = projection.createVirtualDisplay(
             "pillion", WIDTH, HEIGHT, dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, handler,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, h,
         )
         Log.d(TAG, "screen: virtual display created (${WIDTH}x$HEIGHT)")
     }
@@ -102,7 +106,8 @@ class MediaProjectionScreenSource(
         runCatching { display?.release() }
         runCatching { reader?.close() }
         runCatching { projection.stop() }
-        thread.quitSafely()
+        thread?.quitSafely()
+        thread = null; handler = null
         latest = null
     }
 

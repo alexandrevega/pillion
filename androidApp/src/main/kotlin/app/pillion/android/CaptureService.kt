@@ -40,7 +40,7 @@ import java.util.concurrent.Executor
  */
 class CaptureService : Service() {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var engine: MirrorEngine? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var dashEnabled = false
@@ -55,6 +55,12 @@ class CaptureService : Service() {
         if (intent?.action == ACTION_STOP) {
             stopSelf()
             return START_NOT_STICKY
+        }
+        // Re-entry guard: if a previous session is still alive (system kill+restart, double tap),
+        // tear it down first so its ImageReader/VirtualDisplay/threads don't accumulate.
+        if (engine != null) {
+            Log.w(TAG, "start while running — tearing down previous session")
+            teardown()
         }
         acquireWakeLock()
         _state.value = MirrorState.Connecting
@@ -103,7 +109,7 @@ class CaptureService : Service() {
         runCatching { mirror.start() }
 
         val source: ScreenSource = if (dashEnabled) {
-            val switch = SwitchableScreenSource(mirror, DashStreamScreenSource())
+            val switch = SwitchableScreenSource(mirror, DashStreamScreenSource(this))
             dashSwitch = switch
             // Spawn or reuse the helper. Starting it needs Wireless Debugging, but an already-running
             // helper serves over loopback and survives Wi-Fi loss.
@@ -367,22 +373,25 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
+        teardown()
+        _state.value = MirrorState.Idle
+        super.onDestroy()
+    }
+
+    /** Tear down a running session (engine, helper, receivers, scope). */
+    private fun teardown() {
         engine?.stop()
         DashHelper.stopWatchdog() // stop first, so it doesn't respawn the helper we're tearing down
         screenReceiver?.let { runCatching { unregisterReceiver(it) } }
         unregisterKeyguardUnlockListener()
-        // The helper is detached (orphaned to init), so it won't die on its own. Tell it to QUIT over
-        // loopback — works with no network — to release the trusted display; pkill over ADB is a
-        // best-effort backup (only reachable while wifi is up). Detached thread: must outlive cancel().
         val switch = dashSwitch
         if (dashEnabled) Thread {
             runCatching { switch?.quit() }
             killHelper()
         }.start()
         scope.cancel()
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         releaseWakeLock()
-        _state.value = MirrorState.Idle
-        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

@@ -34,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import app.pillion.server.DashServer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -177,7 +178,8 @@ class AdbBootstrapActivity : ComponentActivity() {
                             runCatching {
                                 // nohup + & : the helper outlives this ADB stream, so it keeps serving
                                 // frames after Wi-Fi drops on the bike.
-                                val cmd = "CLASSPATH=\$(pm path app.pillion | grep base.apk | cut -d: -f2) " +
+                                val token = DashHelper.newToken(applicationContext)
+                                val cmd = "${DashServer.TOKEN_ENV}=$token CLASSPATH=\$(pm path app.pillion | grep base.apk | cut -d: -f2) " +
                                     "nohup app_process / app.pillion.server.DashServer " +
                                     "960 480 160 40 480 240 $component >/dev/null 2>&1 &"
                                 val stream = PillionAdb.getInstance(applicationContext).openExecStream(cmd)
@@ -196,7 +198,7 @@ class AdbBootstrapActivity : ComponentActivity() {
                     scope.launch {
                         append("Reading frames over loopback TCP…")
                         withContext(Dispatchers.IO) {
-                            val src = DashStreamScreenSource()
+                            val src = DashStreamScreenSource(this@AdbBootstrapActivity)
                             src.start()
                             var got = 0
                             repeat(20) {

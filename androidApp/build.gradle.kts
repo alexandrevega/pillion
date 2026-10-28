@@ -15,7 +15,7 @@ android {
         applicationId = "app.pillion"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 2
+        versionCode = 3
         versionName = libs.versions.app.versionName.get()
     }
     buildFeatures {
@@ -73,6 +73,10 @@ dependencies {
     implementation(libs.libadb.android)
     implementation(libs.bouncycastle.pkix)
     implementation(libs.conscrypt.android)
+    // Memory-leak detection in debug builds only (release APK stays clean).
+    debugImplementation("com.squareup.leakcanary:leakcanary-android:2.14")
     // SDL "Path B": USB/AOA full-motion H.264 to USB head units (Tracer etc.).
     implementation(libs.smartdevicelink.android)
+    // sdl_android drags in fragment 1.2.0, which breaks the ActivityResult API (and fails release lint).
+    implementation(libs.androidx.fragment)
 }

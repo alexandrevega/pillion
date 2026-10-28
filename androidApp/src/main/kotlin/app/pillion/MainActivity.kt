@@ -121,6 +121,14 @@ class MainActivity : ComponentActivity() {
         val intent = Intent(this, SdlService::class.java)
             .putExtra(SdlService.EXTRA_APP_ID, SdlService.APP_ID_GARMIN)
             .putExtra(SdlService.EXTRA_MIRROR, true)
+            // Wireless: when a TCP host is configured, the SDL session streams over Wi-Fi to the
+            // bike's SDL endpoint instead of USB AOA.
+            .apply {
+                pendingSettings.tcpHost?.let { host ->
+                    putExtra(SdlService.EXTRA_TCP_HOST, host)
+                    putExtra(SdlService.EXTRA_TCP_PORT, pendingSettings.tcpPort)
+                }
+            }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
         else startService(intent)
     }

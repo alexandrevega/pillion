@@ -7,13 +7,19 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.usb.UsbManager
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import app.pillion.core.Logger
 import app.pillion.core.MirrorState
 import com.smartdevicelink.managers.SdlManager
@@ -37,6 +43,13 @@ import com.smartdevicelink.transport.BaseTransportConfig
 import com.smartdevicelink.transport.MultiplexTransportConfig
 import com.smartdevicelink.transport.TCPTransportConfig
 import com.smartdevicelink.transport.enums.TransportType
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import kotlin.math.pow
 import com.smartdevicelink.util.SystemInfo
 import java.util.Vector
 
@@ -51,16 +64,46 @@ class SdlService : Service() {
 
     private var sdlManager: SdlManager? = null
     private var currentKey: String? = null
+    private var autoDiscoveryPending = false
     private var videoStarted = false
     private var mirrorMode = false
     private var hmiFull = false // dash has activated us (FULL/LIMITED) — video may start once we have capture
     private var stopping = false // user-initiated stop in progress — resolve async callbacks to Idle, not reconnect
+    // Session health (Tracer field hardening, 2026-10): distinguishes a live session from a dead-but
+    // non-null sdlManager object, so re-attach/retry logic rebuilds instead of silently no-op'ing.
+    private var regOk = false // listener.onStart fired — the head unit accepted this session
+    private var sessionFailed = false // transport/registration error seen on the current session
+    private var lastBuildAt = 0L
+    private var retryCount = 0
+    private val retryHandler = Handler(Looper.getMainLooper())
+    private var lastAppId: String? = null
+    private var lastTcpHost: String? = null
+    private var lastTcpPort = 12345
+    // v4: when the dash leaves HMI FULL/LIMITED (NONE), stream frames into a dead UI for a while —
+    // tear the video down after a 5 s grace so a quick flicker doesn't cut the stream; re-arm on FULL.
+    private val videoHandler = Handler(Looper.getMainLooper())
+    private val hmiTeardown = Runnable {
+        if (!hmiFull && videoStarted) {
+            Logger.d("sdl: dash stayed off FULL for 5 s — tearing video down (will re-arm automatically on FULL)")
+            try {
+                val vsm = sdlManager?.videoStreamManager
+                if (vsm != null && vsm.isStreaming) vsm.stopStreaming()
+            } catch (t: Throwable) {
+                Logger.e("sdl: stopStreaming on HMI NONE err", t)
+            }
+            videoStarted = false
+            SdlSessionState.state.value = MirrorState.Connecting
+        }
+    }
     private var videoCapability: VideoStreamingCapability? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
+        BikeInputBridge.init(applicationContext)
         startInForeground(false)
+        // Wi-Fi behaves like USB from here: join the bike hotspot -> auto-discover -> auto-connect.
+        startWifiWatch()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -74,6 +117,7 @@ class SdlService : Service() {
             setUserStopped(this, true)
             sdlManager?.dispose()
             sdlManager = null
+            releaseCapture() // user Stop must also give back the MediaProjection + shared VirtualDisplay
             SdlSessionState.state.value = MirrorState.Idle
             stopSelf()
             return START_NOT_STICKY
@@ -89,10 +133,34 @@ class SdlService : Service() {
         if (!auto) setUserStopped(this, false)
         stopping = false // a start is proceeding — no longer stopping
         if (auto && sdlManager != null) {
-            // Already registered; re-asserting foreground here would churn the FGS type and (on
-            // Android 14+) can stop an active screen capture. Leave the live session untouched.
-            Logger.d("sdl: auto-start ignored — session already active")
-            return START_STICKY
+            val healthy = regOk && !sessionFailed
+            val tcpLive = !lastTcpHost.isNullOrEmpty()
+            val staleWaiting =
+                !regOk && !sessionFailed &&
+                SystemClock.elapsedRealtime() - lastBuildAt > 15_000
+            // v4 USB-priority policy (Settings toggle "USB overrides Wi-Fi", default ON): a USB attach
+            // on a LIVE TCP session tears the TCP session down and rebuilds on USB (Motorize-like).
+            // Toggle OFF = the healthy TCP session ignores the plug-in (charging / flaky-cable safety).
+            if (healthy && tcpLive && isUsbOverride(this)) {
+                Logger.d("sdl: ==== USB attached while TCP live + override ON -> switching session to USB ====")
+                intentionalDispose()
+                retryCount = 0 // a plug-in is a user gesture, not a failure retry
+            } else if (healthy || (!sessionFailed && !staleWaiting)) {
+                // Healthy (or freshly pending) session; re-asserting foreground here would churn the
+                // FGS type and (on Android 14+) can stop an active screen capture. Leave it untouched.
+                Logger.d("sdl: auto-start ignored — session already active" +
+                    (if (healthy && tcpLive) " (TCP live, USB override OFF)" else ""))
+                return START_STICKY
+            } else {
+                // Field lesson (Tracer, 2026-10): after ONE failed registration every later plug-in was a
+                // silent no-op, because this guard accepted a dead sdlManager object as "active". A plug-in
+                // on a failed or hung session must dispose + rebuild — that is the Motorize-like
+                // "plug in and it keeps retrying" behaviour. The rebuild below uses THIS intent's transport
+                // (auto intent = no tcpHost = USB), so a dead TCP session becomes a USB one.
+                Logger.d("sdl: ==== auto-start on dead session -> disposing for rebuild ====")
+                intentionalDispose()
+                retryCount = 0
+            }
         }
         // Mirror intent is sticky: once the user grants capture, keep streaming even if the router later
         // re-fires an auto-start without the flag.
@@ -100,15 +168,26 @@ class SdlService : Service() {
         startInForeground(mirrorMode)
         if (mirrorMode) ensureProjection()
         val appId = intent?.getStringExtra(EXTRA_APP_ID) ?: APP_ID_GENERIC
-        val tcpHost = intent?.getStringExtra(EXTRA_TCP_HOST)
+        var tcpHost = intent?.getStringExtra(EXTRA_TCP_HOST)
         val tcpPort = intent?.getIntExtra(EXTRA_TCP_PORT, 12345) ?: 12345
+        // v4 transport policy on manual Start:
+        //  - cable already in + override ON  -> USB wins even if an IP was typed (incl. "auto" scan)
+        //  - blank IP, no cable             -> arm only: no TCP, no scan; the attach builds the session
+        if (isUsbOverride(this) && accessoryConnected() && !tcpHost.isNullOrEmpty()) {
+            Logger.d("sdl: USB accessory present + override ON — starting on USB, ignoring IP $tcpHost")
+            tcpHost = null
+        }
+        if (!auto && sdlManager == null && tcpHost == null && !accessoryConnected()) {
+            Logger.d("sdl: armed (mirror ready) — no IP and no cable; waiting for USB attach or a Wi-Fi network to build the session")
+            SdlSessionState.state.value = MirrorState.Connecting
+            return START_STICKY
+        }
         // The screen-capture grant is deliberately NOT part of the key: granting capture must reuse the
         // live SDL registration and just add video — never tear it down and re-register.
         val key = appId + "|" + (tcpHost ?: "mux") + (if (tcpHost != null) ":$tcpPort" else "")
         if (sdlManager != null && key != currentKey) {
             Logger.d("sdl: transport/appId changed -> disposing previous session")
-            sdlManager?.dispose()
-            sdlManager = null
+            intentionalDispose()
         }
         if (sdlManager == null) {
             currentKey = key
@@ -142,6 +221,182 @@ class SdlService : Service() {
         }
     }
 
+    /** Give the capture back on every stop path: stop the live MediaProjection (kills the system
+     *  "screen being cast" indicator) and free the process-level shared VirtualDisplay. Idempotent —
+     *  safe when already null or already revoked by the system (its onStop callback no-ops). */
+    private fun releaseCapture() {
+        ProjectionHolder.projection?.let { runCatching { it.stop() } }
+        ProjectionHolder.projection = null
+        ScreenMirrorDisplay.releaseShared()
+    }
+
+    /** True when a USB accessory (the CCU in accessory mode) is currently open on this device. */
+    private fun accessoryConnected(): Boolean = try {
+        (getSystemService(Context.USB_SERVICE) as UsbManager).accessoryList?.isNotEmpty() == true
+    } catch (_: Throwable) {
+        false
+    }
+
+    // ---- Wi-Fi auto-connect (v4.0.4) -------------------------------------------------------------
+    // Joining the bike's Wi-Fi hotspot should behave like a USB attach — no Start re-tap — but only
+    // for users who OPT IN via the persisted tcp_host tri-state: blank = USB-only (no scan at all),
+    // a literal IP/hostname = connect DIRECT to that host, "auto" = gateway-first probe + one /24
+    // sweep per network (the hotspot's gateway is the bike: DHCP server + SDL host on the same box).
+
+    private var wifiCallback: ConnectivityManager.NetworkCallback? = null
+    private var scannedSubnet: String? = null // one bounded subnet sweep per joined network
+
+    private fun startWifiWatch() {
+        if (wifiCallback != null) return
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) = wifiArrived(network)
+                override fun onLost(network: Network) = wifiLost()
+            }
+            cm.registerNetworkCallback(
+                NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .build(),
+                cb,
+            )
+            wifiCallback = cb
+            Logger.d("sdl: Wi-Fi watch armed — joining an SDL-capable hotspot auto-connects")
+            // Already on Wi-Fi when the service (re)starts — probe that network right away.
+            wifiArrived(cm.activeNetwork)
+        } catch (t: Throwable) {
+            Logger.e("sdl: Wi-Fi watch failed to register", t)
+        }
+    }
+
+    private fun stopWifiWatch() {
+        wifiCallback?.let {
+            try {
+                (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it)
+            } catch (_: Throwable) {
+            }
+        }
+        wifiCallback = null
+    }
+
+    private fun wifiArrived(network: Network?) {
+        if (stopping || isUserStopped(this) || sdlManager != null) return
+        // A live USB session outranks Wi-Fi (Motorize-like); the USB toggle policy already handled
+        // attach-time switching, so here we simply don't let Wi-Fi race in behind a real cable.
+        if (accessoryConnected() && isUsbOverride(this)) return
+        val prefs = getSharedPreferences("pillion.settings", Context.MODE_PRIVATE)
+        val port = try {
+            prefs.getInt("tcp_port", 12345)
+        } catch (_: Throwable) {
+            12345
+        }
+        // Tri-state opt-in (the persisted store IS the Start-time choice — App writes it on Start):
+        // blank = USB-only, literal host = direct dial, "auto" = explicit gateway+sweep scan.
+        val configuredHost = try {
+            prefs.getString("tcp_host", "") ?: ""
+        } catch (_: Throwable) {
+            ""
+        }
+        val autoScan = configuredHost.equals("auto", ignoreCase = true)
+        if (!autoScan && configuredHost.isNotBlank()) {
+            // Literal IP/hostname: probe ONLY that host — no gateway probe, no /24 sweep.
+            Logger.d("sdl: Wi-Fi up — dialling configured host $configuredHost:$port directly")
+            Thread {
+                if (!probeTcp(configuredHost, port, 2500)) {
+                    Logger.d("sdl: configured SDL host $configuredHost does not answer on port $port — staying armed")
+                    return@Thread
+                }
+                Handler(Looper.getMainLooper()).post {
+                    if (stopping || isUserStopped(this) || sdlManager != null) return@post
+                    Logger.d("sdl: ==== configured SDL host $configuredHost:$port answers — building session (USB-style) ====")
+                    retryCount = 0
+                    buildAndStart(lastAppId ?: APP_ID_GARMIN, configuredHost, port)
+                }
+            }.start()
+            return
+        }
+        if (!autoScan) {
+            Logger.d("transport: USB-only (blank host) — join scan skipped")
+            return
+        }
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val lp = network?.let { cm.getLinkProperties(it) } ?: return
+        // Hotspot truth: the DHCP *server* is the hotspot host = the bike (also serving SDL).
+        // No public LinkProperties.getGateways() on this SDK; a default route's gateway is the fallback.
+        val gateway: InetAddress = lp.dhcpServerAddress
+            ?: lp.routes.firstOrNull { it.gateway != null }?.gateway
+            ?: return
+        val prefix = linkPrefix(lp) ?: return
+        Logger.d("sdl: Wi-Fi up via $prefix.0 gateway $gateway — probing SDL port $port")
+        Thread {
+            val host = discoverSdlHost(gateway, prefix, port)
+            if (host == null) {
+                Logger.d("sdl: Wi-Fi hotspot has no answering SDL port — staying armed")
+                return@Thread
+            }
+            // Back on the main thread: building sessions is main-thread work (as everywhere here).
+            Handler(Looper.getMainLooper()).post {
+                if (stopping || isUserStopped(this) || sdlManager != null) return@post
+                Logger.d("sdl: ==== Wi-Fi SDL host found at $host:$port — building session (USB-style) ====")
+                retryCount = 0
+                buildWithTransport(lastAppId ?: APP_ID_GARMIN, host, port)
+            }
+        }.start()
+    }
+
+    private fun wifiLost() {
+        // Network gone = cable unplugged in USB semantics: drop the TCP session and wait for the
+        // next onAvailable (which rediscovers) instead of letting the suite reconnect into nothing.
+        if (!lastTcpHost.isNullOrEmpty() && sdlManager != null) {
+            Logger.d("sdl: Wi-Fi lost — disposing TCP session, waiting for the network to return")
+            intentionalDispose()
+            retryCount = 0
+        }
+    }
+
+    /** IPv4 /24 the phone holds on this network, e.g. "192.168.0" — the sweep scope. */
+    private fun linkPrefix(lp: android.net.LinkProperties): String? = try {
+        val addr = lp.linkAddresses.firstOrNull { it.address is java.net.Inet4Address }?.address ?: return null
+        addr.hostAddress?.split('.')?.dropLast(1)?.joinToString(".")
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** Gateway first (the hotspot IS the bike), then one bounded /24 sweep — returns first live SDL host. */
+    private fun discoverSdlHost(gateway: InetAddress, prefix: String, port: Int): String? {
+        if (probeTcp(gateway.hostAddress, port, 2500)) return gateway.hostAddress
+        if (scannedSubnet == prefix) return null // already swept this network; don't spam the LAN
+        scannedSubnet = prefix
+        val pool = Executors.newFixedThreadPool(24)
+        try {
+            val probes: List<Future<Boolean>> =
+                (1..254).map { host -> pool.submit<Boolean> { probeTcp("$prefix.$host", port, 1200) } }
+            // First address that answers the SDL port is treated as the Core.
+            for ((idx, ff) in probes.withIndex()) {
+                try {
+                    if (ff.get(30, TimeUnit.SECONDS)) {
+                        val host = "$prefix.${idx + 1}"
+                        Logger.d("sdl: subnet sweep hit $host:$port")
+                        return host
+                    }
+                } catch (_: Throwable) {
+                }
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+        return null
+    }
+
+    private fun probeTcp(host: String, port: Int, timeoutMs: Int): Boolean = try {
+        Socket().use {
+            it.connect(InetSocketAddress(host, port), timeoutMs)
+            true
+        }
+    } catch (_: Throwable) {
+        false
+    }
+
     private fun startInForeground(mirror: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = getSystemService(NotificationManager::class.java)
@@ -158,8 +413,25 @@ class SdlService : Service() {
             // Pass the EXACT type — the no-arg startForeground validates ALL manifest types, and
             // mediaProjection without a projection grant throws (that was the crash).
             var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            if (mirror) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            startForeground(1, n, type)
+            // mirror mode ALWAYS requests the projection type — on FIRST grant the projection object
+            // does not exist yet yet the type must already be registered for ensureProjection() to be
+            // legal (Android 14+). If Android refuses (no grant held) the catch below falls back.
+            val wantProjection = mirror
+            if (wantProjection) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            try {
+                startForeground(1, n, type)
+            } catch (t: Throwable) {
+                // Never crash on FGS churn: fall back to the safe connectedDevice type.
+                if (wantProjection) {
+                    Logger.e("sdl: FGS mediaProjection type refused — falling back to connectedDevice", t)
+                    try {
+                        startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                    } catch (_: Throwable) {
+                    }
+                } else {
+                    throw t
+                }
+            }
         } else {
             startForeground(1, n)
         }
@@ -167,6 +439,83 @@ class SdlService : Service() {
 
     private fun buildAndStart(appId: String, tcpHost: String?, tcpPort: Int) {
         SdlSessionState.state.value = MirrorState.Connecting
+        if (tcpHost == "auto") {
+            // No manual IP — scan the current Wi-Fi subnet for an open SDL port.
+            val main = Handler(Looper.getMainLooper())
+            if (autoDiscoveryPending) {
+                Logger.d("sdl: auto-discovery already running — ignoring re-fire")
+                return
+            }
+            autoDiscoveryPending = true
+            Thread {
+                Logger.d("sdl: auto-discovering dash on :$tcpPort …")
+                val host = TcpDiscovery.discover(tcpPort)
+                main.post {
+                    autoDiscoveryPending = false
+                    if (host == null) {
+                        Logger.d("sdl: auto-discovery found nothing — waiting for manual IP or USB")
+                        SdlSessionState.state.value = MirrorState.Idle
+                    } else if (sdlManager != null || stopping || isUserStopped(this)) {
+                        // Bug 9 (v4): a late scan result must NEVER replace a live session — that
+                        // orphaned an active USB/mux registration behind a fresh TCP one.
+                        Logger.d("sdl: late discovery result skipped — session already exists")
+                    } else {
+                        buildWithTransport(appId, host, tcpPort)
+                    }
+                }
+            }.start()
+        } else {
+            buildWithTransport(appId, tcpHost, tcpPort)
+        }
+    }
+
+    /** Re-arm a fresh SDL session after a failure without waiting for a re-plug (Motorize-like retry).
+     *  Escalating backoff: 8 s, 24 s, 72 s, then 3-minute steps, capped at [MAX_SESSION_RETRY] tries;
+     *  a successful registration resets the series. Explicit delayMs overrides the first attempt. */
+    private fun scheduleRebuild(delayMs: Long = -1L) {
+        if (retryCount >= MAX_SESSION_RETRY) {
+            Logger.d("sdl: session rebuild cap reached — waiting for manual Start or re-plug")
+            return
+        }
+        val delay = if (delayMs >= 0) delayMs
+        else minOf(8_000L * 3.0.pow(retryCount.toDouble()).toLong(), 180_000L)
+        retryCount++
+        retryHandler.removeCallbacksAndMessages(null)
+        Logger.d("sdl: rebuilding SDL session in ${delay / 1000} s (attempt $retryCount/$MAX_SESSION_RETRY)")
+        retryHandler.postDelayed({
+            if (!stopping && !isUserStopped(this) && !regOk) {
+                Logger.d("sdl: ==== REBUILDING SDL SESSION ====")
+                sdlManager?.dispose()
+                sdlManager = null
+                buildWithTransport(lastAppId ?: APP_ID_GENERIC, lastTcpHost, lastTcpPort)
+            }
+        }, delay)
+    }
+
+    /** Policy-driven dispose (USB switch, dead session, key change, Wi-Fi loss): SdlManager.dispose()
+     *  fires the listener's onDestroy SYNCHRONOUSLY, which self-arms a 20 s rebuild against the very
+     *  session we are intentionally replacing. Dispose is synchronous, so scrubbing the retry queue
+     *  right AFTER it is airtight (video/HMI handlers untouched). */
+    private fun intentionalDispose() {
+        sdlManager?.dispose()
+        sdlManager = null
+        retryHandler.removeCallbacksAndMessages(null)
+    }
+
+    private fun buildWithTransport(appId: String, tcpHost: String?, tcpPort: Int) {
+        // A fresh build always wins: cancel any rebuild still pending from the previous session so it
+        // can't stomp this one mid-registration (see intentionalDispose).
+        retryHandler.removeCallbacksAndMessages(null)
+        regOk = false
+        sessionFailed = false
+        // Fresh session = fresh video gate: the old session's VideoStreamManager died with it, so
+        // maybeStartVideo() must be allowed to start a new one when the dash goes HMI FULL again.
+        videoStarted = false
+        hmiFull = false
+        lastBuildAt = SystemClock.elapsedRealtime()
+        lastAppId = appId
+        lastTcpHost = tcpHost
+        lastTcpPort = tcpPort
         val garmin = APP_ID_GARMIN == appId
         val appTypes = Vector<AppHMIType>().apply { add(AppHMIType.NAVIGATION) }
 
@@ -192,19 +541,39 @@ class SdlService : Service() {
 
         val listener = object : SdlManagerListener {
             override fun onStart() {
+                regOk = true
+                sessionFailed = false
+                retryCount = 0
                 Logger.d("sdl: ==== REGISTERED — head unit accepted us ====")
                 Logger.d("sdl: now activate the app on the dash (HMI FULL) — video starts then")
             }
 
             override fun onDestroy() {
                 Logger.d("sdl: session ended (onDestroy)")
+                sessionFailed = true
+                regOk = false
+                sdlManager = null
                 SdlSessionState.state.value = MirrorState.Idle
-                stopSelf()
+                // Unexpected end while the user still wants the link: the suite's own transport
+                // auto-reconnect gets first refusal (it revives the live session in seconds); if it
+                // hasn't re-registered within 20 s, force a full session rebuild ourselves.
+                if (isUserStopped(this@SdlService) || stopping) {
+                    stopSelf()
+                } else {
+                    scheduleRebuild(20_000)
+                }
             }
 
             override fun onError(info: String?, e: Exception?) {
                 Logger.d("sdl ERROR: $info ${e?.message ?: ""}")
+                if (stopping || isUserStopped(this@SdlService)) {
+                    SdlSessionState.state.value = MirrorState.Idle
+                    return
+                }
+                sessionFailed = true
+                regOk = false
                 SdlSessionState.state.value = MirrorState.Error(info ?: "SDL error")
+                scheduleRebuild()
             }
 
             override fun managerShouldUpdateLifecycle(language: Language?, hmiLanguage: Language?): LifecycleConfigurationUpdate? = null
@@ -230,7 +599,13 @@ class SdlService : Service() {
                 val lvl = (notification as OnHMIStatus).hmiLevel
                 Logger.d("sdl HMI status: $lvl")
                 hmiFull = lvl == HMILevel.HMI_FULL || lvl == HMILevel.HMI_LIMITED
-                if (hmiFull) maybeStartVideo()
+                if (hmiFull) {
+                    videoHandler.removeCallbacks(hmiTeardown)
+                    maybeStartVideo()
+                } else if (videoStarted) {
+                    videoHandler.removeCallbacks(hmiTeardown)
+                    videoHandler.postDelayed(hmiTeardown, 5_000)
+                }
             }
         }
         // Log the bike's joystick/controls so we can see what comes through (zoom/scroll/buttons).
@@ -244,6 +619,9 @@ class SdlService : Service() {
             override fun onNotified(notification: RPCNotification) {
                 val bp = notification as OnButtonPress
                 Logger.d("sdl BIKE BUTTON: ${bp.buttonName} (${bp.buttonPressMode})")
+                // Mirror path actuation: synthesize the key locally over the in-app ADB channel when
+                // one is alive; log-only fallback otherwise (see BikeInputBridge).
+                BikeInputBridge.dispatchBikeButton(bp.buttonName?.toString(), bp.buttonPressMode?.toString())
             }
         }
         builder.setRPCNotificationListeners(notifs)
@@ -359,6 +737,10 @@ class SdlService : Service() {
             Logger.e("sdl: stopStreaming err", t)
         }
         ProjectionHolder.projection = null
+        // The projection token is spent: a new capture needs a brand-new consent, so drop the stale
+        // result too, and free the process-level mirror display that belonged to the dead grant.
+        ProjectionHolder.resultData = null
+        ScreenMirrorDisplay.releaseShared()
         mirrorMode = false
         videoStarted = false // allow video to restart if the user grants capture again
         releaseWakeLock()
@@ -379,7 +761,10 @@ class SdlService : Service() {
         try {
             if (wakeLock?.isHeld == true) return
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pillion:sdl-cast").also { it.acquire() }
+            // v4: timeout as a belt-and-braces — if a projection-stop path ever misses the release,
+            // the phone still falls asleep eventually instead of draining overnight (8 h > any ride).
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pillion:sdl-cast")
+                .also { it.acquire(8 * 60 * 60 * 1000L) }
         } catch (t: Throwable) {
             Logger.e("sdl: wakeLock acquire err", t)
         }
@@ -394,9 +779,13 @@ class SdlService : Service() {
     }
 
     override fun onDestroy() {
+        // v4 hardening: no zombie rebuild/post-HMI callbacks may fire after the service is gone.
+        retryHandler.removeCallbacksAndMessages(null)
+        videoHandler.removeCallbacksAndMessages(null)
+        stopWifiWatch()
         releaseWakeLock()
-        sdlManager?.dispose()
-        sdlManager = null
+        releaseCapture() // never leave the "screen being cast" indicator up after the service is gone
+        intentionalDispose() // same self-armed-rebuild scrub as the internal disposes
         SdlSessionState.state.value = MirrorState.Idle
         super.onDestroy()
     }
@@ -429,6 +818,15 @@ class SdlService : Service() {
         fun isUserStopped(ctx: Context): Boolean =
             ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_USER_STOPPED, false)
 
+        /**
+         * v4 transport policy toggle — read from the MAIN settings store (AndroidSettingsStore),
+         * so the Settings checkbox applies immediately without a Start round-trip. Default ON:
+         * USB attach overrides a live/possible TCP session. OFF: a healthy TCP session ignores
+         * the plug-in; a dead one still rebuilds on USB.
+         */
+        fun isUsbOverride(ctx: Context): Boolean =
+            ctx.getSharedPreferences("pillion.settings", Context.MODE_PRIVATE).getBoolean("usb_override", true)
+
         const val APP_ID_GENERIC = "5c9d0a3e-8b27-4f6a-9c11-7e2d3a4b5c6d"
 
         /** Garmin Motorize's real fullAppID — passes the head unit's policy gate. */
@@ -436,5 +834,6 @@ class SdlService : Service() {
 
         private const val APP_NAME = "Pillion"
         private const val CHANNEL_ID = "pillion-sdl"
+        private const val MAX_SESSION_RETRY = 10
     }
 }

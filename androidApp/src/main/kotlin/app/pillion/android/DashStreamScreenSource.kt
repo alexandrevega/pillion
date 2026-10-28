@@ -1,11 +1,11 @@
 package app.pillion.android
 
+import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import app.pillion.core.ScreenSource
 import app.pillion.server.DashServer
 import java.io.DataInputStream
-import java.net.InetSocketAddress
 import java.net.Socket
 
 /**
@@ -18,7 +18,8 @@ import java.net.Socket
  * the helper is spawned (detached), frames flow with no network. Connection is retried so the app
  * can start before the helper and reconnect freely.
  */
-class DashStreamScreenSource : ScreenSource {
+class DashStreamScreenSource(context: Context) : ScreenSource {
+    private val appContext = context.applicationContext
     private val thread = Thread(::readLoop).apply { isDaemon = true }
     @Volatile private var running = false
     @Volatile private var socket: Socket? = null
@@ -37,10 +38,9 @@ class DashStreamScreenSource : ScreenSource {
     private fun readLoop() {
         while (running) {
             try {
-                val s = Socket().apply {
-                    tcpNoDelay = true
-                    connect(InetSocketAddress("127.0.0.1", DashServer.PORT), CONNECT_TIMEOUT_MS)
-                }
+                // Authenticates with the helper's saved token; the token is re-read on every connect so a
+                // watchdog respawn (which rotates it) is picked up automatically.
+                val s = DashHelper.connectAuthenticated(appContext, CONNECT_TIMEOUT_MS)
                 socket = s
                 Log.d(TAG, "dash stream: connected to 127.0.0.1:${DashServer.PORT}")
                 syncDesiredState(s)

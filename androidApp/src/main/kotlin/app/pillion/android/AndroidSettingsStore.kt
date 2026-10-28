@@ -36,10 +36,34 @@ class AndroidSettingsStore(context: Context) : SettingsStore {
         prefs.edit().putString(KEY_BIKE, id).apply()
     }
 
-    private companion object {
-        const val KEY_THEME = "theme_mode"
-        const val KEY_DASH_ENABLED = "dash_enabled"
-        const val KEY_DASH_RESOLUTION = "dash_resolution"
-        const val KEY_BIKE = "selected_bike_id"
+    override fun usbOverride(): Boolean = prefs.getBoolean(KEY_USB_OVERRIDE, true)
+
+    override fun setUsbOverride(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_USB_OVERRIDE, enabled).apply()
+    }
+
+    override fun tcpHost(): String = prefs.getString(KEY_TCP_HOST, "") ?: ""
+
+    override fun setTcpHost(host: String) {
+        prefs.edit().putString(KEY_TCP_HOST, host).apply()
+    }
+
+    override fun tcpPort(): Int = prefs.getInt(KEY_TCP_PORT, 12345)
+
+    override fun setTcpPort(port: Int) {
+        prefs.edit().putInt(KEY_TCP_PORT, port).apply()
+    }
+
+    /** File name + key mirrored by SdlService (it reads this store to decide attach behaviour). */
+    companion object {
+        const val PREFS_FILE = "pillion.settings"
+        const val KEY_USB_OVERRIDE = "usb_override"
+
+        private const val KEY_THEME = "theme_mode"
+        private const val KEY_DASH_ENABLED = "dash_enabled"
+        private const val KEY_DASH_RESOLUTION = "dash_resolution"
+        private const val KEY_BIKE = "selected_bike_id"
+        private const val KEY_TCP_HOST = "tcp_host"
+        private const val KEY_TCP_PORT = "tcp_port"
     }
 }

@@ -56,6 +56,9 @@ fun App(
         val state by controller.state.collectAsState()
         var quality by rememberSaveable { mutableStateOf(40) }
         var maxFps by rememberSaveable { mutableStateOf(15) }
+        var tcpHost by rememberSaveable { mutableStateOf(settingsStore?.tcpHost()?.takeIf { it.isNotEmpty() } ?: "") }
+        var tcpPortText by rememberSaveable { mutableStateOf((settingsStore?.tcpPort() ?: 12345).toString()) }
+        var usbOverride by remember { mutableStateOf(settingsStore?.usbOverride() ?: true) }
         var showSettings by rememberSaveable { mutableStateOf(false) }
         var showDashOnboarding by rememberSaveable { mutableStateOf(false) }
         var dashEnabled by remember { mutableStateOf(settingsStore?.dashEnabled() ?: false) }
@@ -87,6 +90,22 @@ fun App(
                 onQuality = { quality = it },
                 maxFps = maxFps,
                 onMaxFps = { maxFps = it },
+                tcpHost = tcpHost,
+                onTcpHost = {
+                    tcpHost = it
+                    // Apply as-you-type: there is no Apply button, so the field IS the commit.
+                    settingsStore?.setTcpHost(it.trim())
+                },
+                tcpPortText = tcpPortText,
+                onTcpPortText = {
+                    tcpPortText = it
+                    it.toIntOrNull()?.let { p -> settingsStore?.setTcpPort(p) }
+                },
+                usbOverride = usbOverride,
+                onUsbOverride = {
+                    usbOverride = it
+                    settingsStore?.setUsbOverride(it)
+                },
                 themeMode = themeMode,
                 onThemeMode = { themeMode = it; settingsStore?.setThemeMode(it) },
                 dashSupported = dashSetup != null,
@@ -108,7 +127,26 @@ fun App(
                 state = state,
                 update = update,
                 onOpenSettings = { showSettings = true },
-                onStart = { controller.start(MirrorSettings(quality, maxFps, dashResolution)) },
+                onStart = {
+                    val port = tcpPortText.toIntOrNull() ?: 12345
+                    // Persist so the typed IP/port survives restarts — Start on the next launch
+                    // reuses it without re-typing (the whole point of the Wi-Fi mode).
+                    settingsStore?.setTcpHost(tcpHost.trim())
+                    settingsStore?.setTcpPort(port)
+                    controller.start(
+                        MirrorSettings(
+                            quality = quality,
+                            maxFps = maxFps,
+                            dashResolution = dashResolution,
+                            // Tri-state transport opt-in: blank = USB-only, the service arms and waits
+                            // for the bike cable — no scan of any kind on a Wi-Fi join. A typed IP /
+                            // hostname connects DIRECT to that host on Wi-Fi join. The literal "auto"
+                            // opts into gateway-first discovery with one /24 sweep per network.
+                            tcpHost = tcpHost.trim().takeIf { it.isNotEmpty() },
+                            tcpPort = port,
+                        )
+                    )
+                },
                 onStop = controller::stop,
             )
         }
