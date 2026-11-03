@@ -20,6 +20,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.AlertDialog
@@ -52,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.pillion.core.AppInfo
+import app.pillion.core.DashDpi
 import app.pillion.core.DashApp
 import app.pillion.core.DashResolution
 import app.pillion.core.ThemeMode
@@ -74,6 +77,8 @@ internal fun SettingsScreen(
     dashEnabled: Boolean = false,
     dashResolution: DashResolution = DashResolution.DEFAULT,
     onDashResolution: (DashResolution) -> Unit = {},
+    dashDpi: Int = DashDpi.DEFAULT,
+    onDashDpi: (Int) -> Unit = {},
     dashApps: List<DashApp> = emptyList(),
     selectedDashApp: String? = null,
     onDashApp: (String?) -> Unit = {},
@@ -234,6 +239,8 @@ internal fun SettingsScreen(
                 GroupDivider()
                 DashResolutionSelector(dashResolution, onDashResolution)
                 GroupDivider()
+                DashDpiSelector(dashDpi, onDashDpi)
+                GroupDivider()
                 DashAppSelector(dashApps, selectedDashApp, onDashApp)
             }
             Text(
@@ -313,6 +320,39 @@ private fun SettingSlider(
             )
         }
         Slider(value = current, onValueChange = onChange, valueRange = min..max)
+    }
+}
+
+@Composable
+private fun DashDpiSelector(dpi: Int, onDpi: (Int) -> Unit) {
+    val value = DashDpi.snap(dpi)
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("DPI", style = MaterialTheme.typography.bodyLarge)
+            Text("$value dpi", style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { onDpi(DashDpi.snap(value - DashDpi.STEP)) },
+                enabled = value > DashDpi.MIN, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Filled.Remove, contentDescription = "Decrease DPI by 10")
+            }
+            Slider(value = value.toFloat(),
+                onValueChange = { onDpi(DashDpi.snap(it.roundToInt())) },
+                valueRange = DashDpi.MIN.toFloat()..DashDpi.MAX.toFloat(),
+                steps = (DashDpi.MAX - DashDpi.MIN) / DashDpi.STEP - 1,
+                modifier = Modifier.weight(1f))
+            IconButton(onClick = { onDpi(DashDpi.snap(value + DashDpi.STEP)) },
+                enabled = value < DashDpi.MAX, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Filled.Add, contentDescription = "Increase DPI by 10")
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("${DashDpi.MIN} dpi", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("${DashDpi.MAX} dpi", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 

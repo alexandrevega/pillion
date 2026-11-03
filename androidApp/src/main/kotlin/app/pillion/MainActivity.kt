@@ -138,6 +138,7 @@ class MainActivity : ComponentActivity() {
         val intent = Intent(this, CaptureService::class.java)
             .putExtra(CaptureService.EXTRA_DASH_ENABLED, true)
             .putExtra(CaptureService.EXTRA_DASH_COMPONENT, component.flattenToString())
+            .putExtra(CaptureService.EXTRA_DASH_DPI, settings.dashDpi)
             .putExtra(CaptureService.EXTRA_QUALITY, settings.quality)
             .putExtra(CaptureService.EXTRA_MAX_FPS, settings.maxFps)
             .putExtra(CaptureService.EXTRA_DASH_WIDTH, settings.dashResolution.width)

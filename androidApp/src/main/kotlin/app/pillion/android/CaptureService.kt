@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import app.pillion.core.DashDpi
 import app.pillion.core.DashResolution
 import app.pillion.core.MirrorEngine
 import app.pillion.core.ScreenSource
@@ -60,7 +61,7 @@ class CaptureService : Service() {
         _state.value = MirrorState.Connecting
         val quality = intent?.getIntExtra(EXTRA_QUALITY, 40) ?: 40
         val fps = intent?.getIntExtra(EXTRA_MAX_FPS, 15) ?: 15
-        if (dashEnabled) startDashSession(quality, fps, dashResolutionFrom(intent), intent?.getStringExtra(EXTRA_DASH_COMPONENT))
+        if (dashEnabled) startDashSession(quality, fps, dashResolutionFrom(intent), intent?.getStringExtra(EXTRA_DASH_COMPONENT), DashDpi.snap(intent?.getIntExtra(EXTRA_DASH_DPI, DashDpi.DEFAULT) ?: DashDpi.DEFAULT))
         else startMirrorSession(quality, fps)
         return START_NOT_STICKY
     }
@@ -104,7 +105,7 @@ class CaptureService : Service() {
         }, fps)
     }
 
-    private fun startDashSession(quality: Int, fps: Int, resolution: DashResolution, component: String?) {
+    private fun startDashSession(quality: Int, fps: Int, resolution: DashResolution, component: String?, dpi: Int) {
         if (component.isNullOrBlank()) {
             fail("Select an app to display in Settings")
             return
@@ -115,7 +116,7 @@ class CaptureService : Service() {
             fail("VD foreground service unavailable")
             return
         }
-        val source = DashStreamScreenSource()
+        val source = DashStreamScreenSource(dpi)
         dashSource = source
         runEngine(source, fps, retryInitialConnection = true)
         scope.launch(Dispatchers.IO) {
@@ -275,6 +276,7 @@ class CaptureService : Service() {
         /** When true, the session switches to the dedicated dash display whenever the phone is locked. */
         const val EXTRA_DASH_ENABLED = "dashEnabled"
         const val EXTRA_DASH_COMPONENT = "dashComponent"
+        const val EXTRA_DASH_DPI = "dashDpi"
         const val EXTRA_DASH_WIDTH = "dashWidth"
         const val EXTRA_DASH_HEIGHT = "dashHeight"
 

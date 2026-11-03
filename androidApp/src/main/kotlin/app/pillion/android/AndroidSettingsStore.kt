@@ -1,6 +1,7 @@
 package app.pillion.android
 
 import android.content.Context
+import app.pillion.core.DashDpi
 import app.pillion.core.DashResolution
 import app.pillion.core.SettingsStore
 import app.pillion.core.ThemeMode
@@ -30,6 +31,9 @@ class AndroidSettingsStore(context: Context) : SettingsStore {
         prefs.edit().putString(KEY_DASH_RESOLUTION, resolution.name).apply()
     }
 
+    override fun dashDpi(): Int = DashDpi.snap(prefs.getInt(KEY_DASH_DPI, DashDpi.DEFAULT))
+    override fun setDashDpi(dpi: Int) { prefs.edit().putInt(KEY_DASH_DPI, DashDpi.snap(dpi)).apply() }
+
     override fun dashAppPackage(): String? = prefs.getString(KEY_DASH_APP, null)
 
     override fun setDashAppPackage(packageName: String?) {
@@ -48,5 +52,6 @@ class AndroidSettingsStore(context: Context) : SettingsStore {
         const val KEY_DASH_RESOLUTION = "dash_resolution"
         const val KEY_BIKE = "selected_bike_id"
         const val KEY_DASH_APP = "dash_app_package"
+        const val KEY_DASH_DPI = "dash_dpi"
     }
 }

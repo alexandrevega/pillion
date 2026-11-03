@@ -16,6 +16,9 @@ interface SettingsStore {
     fun dashResolution(): DashResolution
     fun setDashResolution(resolution: DashResolution)
 
+    fun dashDpi(): Int = DashDpi.DEFAULT
+    fun setDashDpi(dpi: Int) {}
+
     /** Package selected for dedicated VD. Null means no choice yet. */
     fun dashAppPackage(): String? = null
     fun setDashAppPackage(packageName: String?) {}

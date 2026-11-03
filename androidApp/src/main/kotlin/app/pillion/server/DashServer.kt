@@ -14,6 +14,7 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import app.pillion.core.DashDpi
 import app.pillion.core.DashCaptureGeometry
 import app.pillion.core.DashFrameGate
 import java.util.concurrent.CountDownLatch
@@ -282,7 +283,9 @@ object DashServer {
         val w = parts.getOrNull(0)?.toIntOrNull() ?: return null
         val h = parts.getOrNull(1)?.toIntOrNull() ?: return null
         val revision = parts.getOrNull(2)?.toIntOrNull() ?: return null
-        if (w !in 1..4096 || h !in 1..4096 || revision <= 0) return null
+        val requestedDpi = parts.getOrNull(3)?.toIntOrNull() ?: virtualDpi
+        if (w !in 1..4096 || h !in 1..4096 || revision <= 0 ||
+            requestedDpi !in DashDpi.MIN..DashDpi.MAX || requestedDpi % DashDpi.STEP != 0) return null
         val size = DashCaptureGeometry.forOutput(preferredVirtualWidth, w, h)
         val handler = captureHandler ?: return null
         val completion = CountDownLatch(1)
@@ -298,7 +301,7 @@ object DashServer {
                     )
                     try {
                         newReader.setOnImageAvailableListener({ ir -> onImage(ir) }, handler)
-                        vd.resize(size.width, size.height, virtualDpi)
+                        vd.resize(size.width, size.height, requestedDpi)
                         vd.setSurface(newReader.surface)
                     } catch (t: Throwable) {
                         newReader.close()
@@ -309,13 +312,16 @@ object DashServer {
                     virtualWidth = size.width
                     virtualHeight = size.height
                     previous?.close()
+                } else if (requestedDpi != virtualDpi) {
+                    (display ?: error("virtual display missing")).resize(size.width, size.height, requestedDpi)
                 }
+                virtualDpi = requestedDpi
                 outputWidth = w
                 outputHeight = h
                 latestJpeg = null
                 sizeConfigured = true
                 successful = true
-                Log.i(TAG, "VD SIZE_READY revision=$revision virtual=${size.width}x${size.height} output=${w}x$h")
+                Log.i(TAG, "VD SIZE_READY revision=$revision virtual=${size.width}x${size.height} output=${w}x$h dpi=$virtualDpi")
             } catch (t: Throwable) {
                 Log.e(TAG, "VD resize failed; frame output held", t)
             } finally {
