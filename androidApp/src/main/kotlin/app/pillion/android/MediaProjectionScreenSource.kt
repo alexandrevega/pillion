@@ -29,16 +29,21 @@ class MediaProjectionScreenSource(
     private var reader: ImageReader? = null
     private var display: VirtualDisplay? = null
     @Volatile private var latest: Bitmap? = null
+    @Volatile private var ended = false
     // Output size sent over NaviLite. Capture is fixed at WIDTHxHEIGHT (the token must be claimed
     // before the handshake reveals the dash size), so we scale the captured frame to this instead.
     @Volatile private var outWidth = WIDTH
     @Volatile private var outHeight = HEIGHT
 
+    @Synchronized
     override fun start() {
-        if (display != null) return // idempotent: capture may be pre-started by the service
+        if (ended || display != null) return // no restart with a stopped, single-use projection
         // Android 14+ requires a registered callback before createVirtualDisplay.
         projection.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() { Log.w(TAG, "screen: projection stopped by the system") }
+            override fun onStop() {
+                Log.w(TAG, "screen: projection stopped")
+                releaseCapture("projection_stopped")
+            }
         }, handler)
         val r = ImageReader.newInstance(WIDTH, HEIGHT, PixelFormat.RGBA_8888, 2)
         r.setOnImageAvailableListener({ ir -> capture(ir) }, handler)
@@ -51,8 +56,10 @@ class MediaProjectionScreenSource(
         Log.d(TAG, "screen: virtual display created (${WIDTH}x$HEIGHT)")
     }
 
+    @Synchronized
     private fun capture(ir: ImageReader) {
-        val image = ir.acquireLatestImage() ?: return
+        if (ended) return
+        val image = runCatching { ir.acquireLatestImage() }.getOrNull() ?: return
         try {
             val first = latest == null
             latest = toBitmap(image)
@@ -77,6 +84,7 @@ class MediaProjectionScreenSource(
     }
 
     override fun latestFrame(): ByteArray? {
+        if (ended) return null
         val bitmap = latest ?: return null
         val w = outWidth
         val h = outHeight
@@ -88,7 +96,8 @@ class MediaProjectionScreenSource(
         val out = ByteArrayOutputStream()
         scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)
         if (scaled !== bitmap) scaled.recycle()
-        return out.toByteArray()
+        // An onStop callback may arrive during JPEG compression. Never hand out a dead frame.
+        return if (ended) null else out.toByteArray()
     }
 
     override fun resizeOutput(width: Int, height: Int) {
@@ -99,11 +108,25 @@ class MediaProjectionScreenSource(
     }
 
     override fun stop() {
-        runCatching { display?.release() }
-        runCatching { reader?.close() }
+        releaseCapture("stop")
         runCatching { projection.stop() }
-        thread.quitSafely()
+    }
+
+    /** A system revocation and the Stop button both converge on the same, idempotent cleanup. */
+    @Synchronized
+    private fun releaseCapture(reason: String) {
+        if (ended) return
+        ended = true
         latest = null
+        val oldDisplay = display
+        val oldReader = reader
+        display = null
+        reader = null
+        runCatching { oldReader?.setOnImageAvailableListener(null, null) }
+        runCatching { oldDisplay?.release() }
+        runCatching { oldReader?.close() }
+        thread.quitSafely()
+        Log.d(TAG, "screen: capture released ($reason)")
     }
 
     private companion object {
