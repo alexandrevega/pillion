@@ -22,6 +22,7 @@ object DashHelper {
     private const val CONNECT_TIMEOUT_MS = 250
     private const val START_TIMEOUT_MS = 5_000L
     private const val WATCHDOG_INTERVAL_MS = 3_000L
+    private const val WIRELESS_DISCOVERY_TIMEOUT_MS = 15_000L
     private const val LOOPBACK_CONNECT_TRIES = 10
     private const val LOOPBACK_RETRY_MS = 300L
     // A freshly-spawned helper takes ~1-2s to create the display + bind its socket; don't respawn
@@ -29,6 +30,8 @@ object DashHelper {
     private const val SPAWN_GRACE_MS = 8_000L
 
     @Volatile private var lastSpawnAt = 0L
+    // Watchdog lifecycle must never wait for ensureRunning() holding the helper/ADB lock.
+    private val watchdogLock = Any()
 
     @Synchronized
     fun ensureRunning(
@@ -72,15 +75,31 @@ object DashHelper {
      * upgrades to loopback so later reconnects, including offline respawns by the watchdog, succeed.
      */
     private fun ensureConnected(adb: PillionAdb, context: Context): Boolean {
-        if (runCatching { adb.connectDevice(PillionAdb.LOOPBACK_HOST, PillionAdb.TCPIP_PORT) }.getOrDefault(false)) {
+        // libadb-android returns false for connect() if the same manager is already connected.
+        // A second Start must reuse that connection, not interpret false as a disconnection.
+        if (adb.isLoopbackConnected()) {
+            Log.d(TAG, "dash: reusing connected ADB session")
+            return true
+        }
+        // A live wireless TLS connection returns false for connect(); migrate it instead.
+        if (adb.isConnected()) {
+            return upgradeToLoopback(adb, context)
+        }
+        val loopback = runCatching { adb.connectDevice(PillionAdb.LOOPBACK_HOST, PillionAdb.TCPIP_PORT) }
+        val loopbackReady = loopback.getOrDefault(false) || adb.isLoopbackConnected()
+        if (loopbackReady) {
             Log.d(TAG, "dash: connected over loopback (offline-capable)")
             return true
         }
-        val wireless = runCatching { adb.autoConnectDevice(context, timeoutMs = 15_000) }
+        val wireless = runCatching { adb.autoConnectDevice(context, timeoutMs = WIRELESS_DISCOVERY_TIMEOUT_MS) }
             .onFailure { Log.w(TAG, "dash: wireless auto-connect failed", it) }
             .getOrDefault(false)
-        if (!wireless) return false
+        if (!wireless && !adb.isConnected()) return false
         Log.d(TAG, "dash: connected over Wireless debugging; upgrading to loopback tcpip")
+        return upgradeToLoopback(adb, context)
+    }
+
+    private fun upgradeToLoopback(adb: PillionAdb, context: Context): Boolean {
         runCatching { adb.enableTcpip() }.onFailure { Log.w(TAG, "dash: enableTcpip failed", it) }
         // adbd is restarting on the new port; retry the loopback connect until it's back up.
         repeat(LOOPBACK_CONNECT_TRIES) {
@@ -92,7 +111,8 @@ object DashHelper {
         }
         // Upgrade failed (e.g. device blocks tcpip); fall back to wireless so we can still spawn now.
         Log.w(TAG, "dash: loopback upgrade failed; staying on Wireless debugging")
-        return runCatching { adb.autoConnectDevice(context, timeoutMs = 5_000) }.getOrDefault(false)
+        return runCatching { adb.autoConnectDevice(context, timeoutMs = WIRELESS_DISCOVERY_TIMEOUT_MS) }
+            .getOrDefault(false) || adb.isConnected()
     }
 
     @Volatile private var watchdog: Thread? = null
@@ -102,40 +122,42 @@ object DashHelper {
      * drops, killing the helper via adbd's cgroup. Recovery uses the loopback channel, so it works
      * offline as long as [PillionAdb.enableTcpip] succeeded earlier.
      */
-    @Synchronized
     fun startWatchdog(context: Context, quality: Int, dashResolution: DashResolution) {
-        if (watchdog?.isAlive == true) return // exactly one watchdog, even across session restarts
-        val appContext = context.applicationContext
-        // Each thread checks `watchdog === this`: if it's no longer the designated watchdog (a new one
-        // started, or stopWatchdog nulled it), it exits — so we never end up with two fighting.
-        val thread = object : Thread("dash-watchdog") {
-            override fun run() {
-                while (watchdog === this && !isInterrupted) {
-                    try {
-                        sleep(WATCHDOG_INTERVAL_MS)
-                    } catch (_: InterruptedException) {
-                        break
+        synchronized(watchdogLock) {
+            if (watchdog?.isAlive == true) return // exactly one watchdog, even across session restarts
+            val appContext = context.applicationContext
+            // Each thread checks `watchdog === this`: if it's no longer the designated watchdog (a new one
+            // started, or stopWatchdog nulled it), it exits — so we never end up with two fighting.
+            val thread = object : Thread("dash-watchdog") {
+                override fun run() {
+                    while (watchdog === this && !isInterrupted) {
+                        try {
+                            sleep(WATCHDOG_INTERVAL_MS)
+                        } catch (_: InterruptedException) {
+                            break
+                        }
+                        if (watchdog !== this) break
+                        if (DashHelper.isRunning()) continue
+                        // A helper we just spawned is still coming up; don't pkill+respawn it mid-startup.
+                        if (SystemClock.elapsedRealtime() - lastSpawnAt < SPAWN_GRACE_MS) continue
+                        Log.w(TAG, "dash: helper down — attempting respawn over loopback")
+                        runCatching { ensureRunning(appContext, quality, dashResolution) }
+                            .onSuccess { Log.i(TAG, "dash: helper respawned") }
+                            .onFailure { Log.w(TAG, "dash: respawn failed (offline / adb gone): ${it.message}") }
                     }
-                    if (watchdog !== this) break
-                    if (DashHelper.isRunning()) continue
-                    // A helper we just spawned is still coming up; don't pkill+respawn it mid-startup.
-                    if (SystemClock.elapsedRealtime() - lastSpawnAt < SPAWN_GRACE_MS) continue
-                    Log.w(TAG, "dash: helper down — attempting respawn over loopback")
-                    runCatching { ensureRunning(appContext, quality, dashResolution) }
-                        .onSuccess { Log.i(TAG, "dash: helper respawned") }
-                        .onFailure { Log.w(TAG, "dash: respawn failed (offline / adb gone): ${it.message}") }
                 }
-            }
-        }.apply { isDaemon = true }
-        watchdog = thread
-        thread.start()
-        Log.d(TAG, "dash: watchdog started")
+            }.apply { isDaemon = true }
+            watchdog = thread
+            thread.start()
+            Log.d(TAG, "dash: watchdog started")
+        }
     }
 
-    @Synchronized
     fun stopWatchdog() {
-        watchdog?.interrupt()
-        watchdog = null
+        synchronized(watchdogLock) {
+            watchdog?.interrupt()
+            watchdog = null
+        }
     }
 
     fun isRunning(): Boolean =
