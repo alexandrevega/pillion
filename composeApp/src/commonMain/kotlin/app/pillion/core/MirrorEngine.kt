@@ -12,6 +12,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Orchestrates a mirroring session: connect -> handshake -> stream screen frames -> report state.
@@ -116,7 +121,20 @@ class MirrorEngine(
         _state.value = MirrorState.Idle
     }
 
-    private suspend fun streamLoop(reader: FrameReader) {
+    private suspend fun streamLoop(reader: FrameReader) = coroutineScope {
+        // FrameReader.next() is blocking I/O: a coroutine timeout around it would not interrupt
+        // the read. Keep a single dedicated reader and let the sender time out on its channel.
+        val incomingFrames = Channel<NaviFrameView>(Channel.BUFFERED)
+        val receiver = launch(Dispatchers.IO) {
+            try {
+                while (running && isActive) incomingFrames.send(reader.next())
+            } catch (t: Throwable) {
+                if (running) incomingFrames.close(t)
+            } finally {
+                incomingFrames.close()
+            }
+        }
+        try {
         // Stop-and-wait: send the freshest frame, then block on its IMAGE_ACK before sending the
         // next, so exactly one frame is ever on the link. A sliding window (sending N+1 before N's
         // ACK returns) buffered a frame ahead and added a whole round-trip of latency on slower
@@ -127,6 +145,7 @@ class MirrorEngine(
         var windowStart = nowMs()
         var ackMsTotal = 0L
         var ackMsMax = 0L
+        var consecutiveTimeouts = 0
         while (running) {
             val jpeg = screen.latestFrame()
             if (jpeg == null) {
@@ -143,13 +162,27 @@ class MirrorEngine(
             }
             val sentAt = nowMs()
             lastSend = sentAt
+            val sentSeq = seq and 0xffff
             sendImage(jpeg)
             lastFrameKb = jpeg.size / 1024
             if (seq == 2) Logger.d("session: first image sent (${jpeg.size} bytes)")
-            // Wait for this frame's ACK before capturing/sending the next one. channel.close() on
-            // stop() unblocks the reader, so this can't hang a teardown.
-            while (running && reader.next().serviceType != ServiceType.IMAGE_ACK) { /* skip non-ACKs */ }
+            // Match only this image's ACK. A late or malformed ACK must not unblock a later image,
+            // and unrelated messages must not restart the 2-second deadline.
+            val acknowledged = awaitImageAck(incomingFrames, sentSeq, ACK_TIMEOUT_MS) { ignored ->
+                Logger.d("session: ignoring IMAGE_ACK expected=$sentSeq actual=${ignored ?: "malformed"}")
+            }
             if (!running) break
+            if (!acknowledged) {
+                consecutiveTimeouts++
+                if (consecutiveTimeouts == 1 || consecutiveTimeouts % 10 == 0) {
+                    Logger.e("session: IMAGE_ACK_TIMEOUT seq=$sentSeq after ${ACK_TIMEOUT_MS}ms (consecutive=$consecutiveTimeouts)")
+                }
+                continue // Send the freshest image without reopening a healthy RFCOMM link.
+            }
+            if (consecutiveTimeouts > 0) {
+                Logger.d("session: IMAGE_ACK recovered seq=$sentSeq after $consecutiveTimeouts timeout(s)")
+                consecutiveTimeouts = 0
+            }
             val ackMs = nowMs() - sentAt
             ackMsTotal += ackMs
             if (ackMs > ackMsMax) ackMsMax = ackMs
@@ -164,6 +197,13 @@ class MirrorEngine(
                 ackMsMax = 0L
                 windowStart = nowMs()
             }
+        }
+        } finally {
+            // Closing the transport is essential: cancelling a coroutine alone cannot unblock
+            // a socket InputStream.read() on all Android Bluetooth implementations.
+            runCatching { channel.close() }
+            receiver.cancel()
+            incomingFrames.cancel()
         }
     }
 
@@ -180,5 +220,29 @@ class MirrorEngine(
     private companion object {
         /** Wait between a dropped link and a reconnect attempt (the dash needs a moment to settle). */
         const val RECONNECT_DELAY_MS = 1500L
+        const val ACK_TIMEOUT_MS = 2000L
     }
 }
+
+/** Returns only for the expected IMAGE_ACK or its deadline; closed transports propagate to reconnect. */
+internal suspend fun awaitImageAck(
+    incomingFrames: ReceiveChannel<NaviFrameView>,
+    expectedSeq: Int,
+    timeoutMs: Long,
+    onIgnoredAck: (Int?) -> Unit = {},
+): Boolean = withTimeoutOrNull(timeoutMs) {
+    var matched = false
+    while (!matched) {
+        val incoming = incomingFrames.receiveCatching().getOrThrow()
+        if (incoming.serviceType == ServiceType.IMAGE_ACK) {
+            val actual = imageAckSequence(incoming.payload)
+            if (actual == expectedSeq) matched = true else onIgnoredAck(actual)
+        }
+    }
+    matched
+} == true
+
+/** IMAGE_ACK echoes the JPEG's 16-bit little-endian sequence number. */
+internal fun imageAckSequence(payload: ByteArray): Int? =
+    if (payload.size >= 2) (payload[0].toInt() and 0xff) or ((payload[1].toInt() and 0xff) shl 8)
+    else null
