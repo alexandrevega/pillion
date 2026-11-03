@@ -14,6 +14,10 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import app.pillion.core.DashCaptureGeometry
+import app.pillion.core.DashFrameGate
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import android.util.Log
 import android.view.Surface
 import java.io.BufferedOutputStream
@@ -77,6 +81,12 @@ object DashServer {
 
     private var virtualWidth = 480
     private var virtualHeight = 240
+    private var preferredVirtualWidth = 480
+    private var virtualDpi = 160
+    private var display: VirtualDisplay? = null
+    private var captureReader: ImageReader? = null
+    private var captureHandler: Handler? = null
+    @Volatile private var sizeConfigured = false
     // Read on the capture/encode thread, written from the control channel (SIZE) — must be volatile.
     @Volatile private var outputWidth = 480
     @Volatile private var outputHeight = 240
@@ -107,7 +117,9 @@ object DashServer {
 
         virtualWidth = args.getOrNull(0)?.toIntOrNull() ?: 480
         virtualHeight = args.getOrNull(1)?.toIntOrNull() ?: 240
+        preferredVirtualWidth = virtualWidth
         val dpi = args.getOrNull(2)?.toIntOrNull() ?: 160
+        virtualDpi = dpi
         quality = args.getOrNull(3)?.toIntOrNull() ?: 40
         val outputArg = args.getOrNull(4)?.toIntOrNull()
         outputWidth = outputArg ?: 480
@@ -119,9 +131,11 @@ object DashServer {
             val context = ShellContext(systemContext())
             val captureThread = HandlerThread("pillion-capture").apply { start() }
             val handler = Handler(captureThread.looper)
+            captureHandler = handler
 
             val reader = ImageReader.newInstance(virtualWidth, virtualHeight, PixelFormat.RGBA_8888, 2)
             reader.setOnImageAvailableListener({ ir -> onImage(ir) }, handler)
+            captureReader = reader
 
             val display = createTrustedVirtualDisplay(
                 context,
@@ -131,6 +145,7 @@ object DashServer {
                 dpi,
                 reader.surface,
             )
+            this.display = display
             displayId = display.display.displayId
             Log.i(
                 TAG,
@@ -155,9 +170,10 @@ object DashServer {
      * drain frames without encoding, so an unlocked phone (mirroring instead) costs no extra battery.
      */
     private fun onImage(reader: ImageReader) {
-        val image = reader.acquireLatestImage() ?: return
+        if (reader !== captureReader) return
+        val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return
         try {
-            if (!capturing) return
+            if (!capturing || !sizeConfigured) return
             val now = System.currentTimeMillis()
             if (now - lastEncodeMs < MIN_INTERVAL_MS) return
             lastEncodeMs = now
@@ -195,19 +211,25 @@ object DashServer {
 
     private fun serveClient(client: Socket) {
         // Reverse channel: the app sends "PROMOTE <component>" on screen-off and "DEMOTE" on unlock.
-        Thread { readCommands(client) }.apply { isDaemon = true; start() }
         try {
             client.tcpNoDelay = true
             val out = DataOutputStream(BufferedOutputStream(client.getOutputStream()))
+            val writeLock = Any()
+            Thread { readCommands(client, out, writeLock) }.apply { isDaemon = true; start() }
             var sentSeq = -1L
             while (!client.isClosed) {
                 val seq = latestSeq
                 val frame = latestJpeg
                 if (frame != null && seq != sentSeq) {
-                    out.writeInt(frame.size)
-                    out.write(frame)
-                    out.flush()
-                    sentSeq = seq
+                    synchronized(writeLock) {
+                        // Old frame snapshots must not overtake the SIZE_READY reply.
+                        if (frame === latestJpeg && sizeConfigured) {
+                            out.writeInt(frame.size)
+                            out.write(frame)
+                            out.flush()
+                            sentSeq = seq
+                        }
+                    }
                 } else {
                     Thread.sleep(10)
                 }
@@ -219,7 +241,7 @@ object DashServer {
         }
     }
 
-    private fun readCommands(client: Socket) {
+    private fun readCommands(client: Socket, out: DataOutputStream, writeLock: Any) {
         try {
             val input = client.getInputStream().bufferedReader()
             while (true) {
@@ -227,7 +249,18 @@ object DashServer {
                 when {
                     line.startsWith("PROMOTE ") -> promoteApp(line.removePrefix("PROMOTE ").trim())
                     line == "DEMOTE" -> demoteApp()
-                    line.startsWith("SIZE ") -> resizeOutput(line.removePrefix("SIZE ").trim())
+                    line.startsWith("SIZE ") -> {
+                        val ready = resizeOutput(line.removePrefix("SIZE ").trim())
+                        if (ready != null) {
+                            synchronized(writeLock) {
+                                out.writeInt(DashFrameGate.SIZE_READY_MARKER)
+                                out.writeInt(ready.revision)
+                                out.writeInt(ready.width)
+                                out.writeInt(ready.height)
+                                out.flush()
+                            }
+                        }
+                    }
                     line == "QUIT" -> shutdown()
                 }
             }
@@ -241,19 +274,59 @@ object DashServer {
     }
 
     /**
-     * Resize the JPEG output to the dash's native size, resolved by the app from the CCU part number
-     * after the NaviLite handshake (e.g. 480x234 for the XMAX/NMAX scooter CCU). The trusted display
-     * keeps its render size; only the encoded frames are rescaled, from the next frame on.
+     * Apply CCU geometry to the existing VD and ImageReader. The task stays on the
+     * same displayId. Reply SIZE_READY only after capture-thread reconfiguration ends.
      */
-    private fun resizeOutput(arg: String) {
+    private fun resizeOutput(arg: String): SizeReady? {
         val parts = arg.split(' ')
-        val w = parts.getOrNull(0)?.toIntOrNull() ?: return
-        val h = parts.getOrNull(1)?.toIntOrNull() ?: return
-        if (w <= 0 || h <= 0 || (w == outputWidth && h == outputHeight)) return
-        outputWidth = w
-        outputHeight = h
-        Log.i(TAG, "output resized to ${w}x$h")
+        val w = parts.getOrNull(0)?.toIntOrNull() ?: return null
+        val h = parts.getOrNull(1)?.toIntOrNull() ?: return null
+        val revision = parts.getOrNull(2)?.toIntOrNull() ?: return null
+        if (w !in 1..4096 || h !in 1..4096 || revision <= 0) return null
+        val size = DashCaptureGeometry.forOutput(preferredVirtualWidth, w, h)
+        val handler = captureHandler ?: return null
+        val completion = CountDownLatch(1)
+        var successful = false
+        val posted = handler.post {
+            sizeConfigured = false
+            latestJpeg = null
+            try {
+                if (size.width != virtualWidth || size.height != virtualHeight) {
+                    val vd = display ?: error("virtual display missing")
+                    val newReader = ImageReader.newInstance(
+                        size.width, size.height, PixelFormat.RGBA_8888, 2,
+                    )
+                    try {
+                        newReader.setOnImageAvailableListener({ ir -> onImage(ir) }, handler)
+                        vd.resize(size.width, size.height, virtualDpi)
+                        vd.setSurface(newReader.surface)
+                    } catch (t: Throwable) {
+                        newReader.close()
+                        throw t
+                    }
+                    val previous = captureReader
+                    captureReader = newReader
+                    virtualWidth = size.width
+                    virtualHeight = size.height
+                    previous?.close()
+                }
+                outputWidth = w
+                outputHeight = h
+                latestJpeg = null
+                sizeConfigured = true
+                successful = true
+                Log.i(TAG, "VD SIZE_READY revision=$revision virtual=${size.width}x${size.height} output=${w}x$h")
+            } catch (t: Throwable) {
+                Log.e(TAG, "VD resize failed; frame output held", t)
+            } finally {
+                completion.countDown()
+            }
+        }
+        if (!posted || !completion.await(5, TimeUnit.SECONDS) || !successful) return null
+        return SizeReady(revision, w, h)
     }
+
+    private data class SizeReady(val revision: Int, val width: Int, val height: Int)
 
     /** Move the foreground app onto the dash display and start encoding (phone just locked). */
     private fun promoteApp(component: String) {

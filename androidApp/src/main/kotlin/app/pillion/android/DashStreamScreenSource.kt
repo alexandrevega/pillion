@@ -1,7 +1,10 @@
 package app.pillion.android
 
+import android.graphics.BitmapFactory
 import android.os.SystemClock
 import android.util.Log
+import app.pillion.core.DashFrameGate
+import app.pillion.core.DashSizeRequest
 import app.pillion.core.ScreenSource
 import app.pillion.server.DashServer
 import java.io.DataInputStream
@@ -26,7 +29,8 @@ class DashStreamScreenSource : ScreenSource {
     @Volatile private var lastFrameAt: Long = 0
     @Volatile private var staleLogged = false
     @Volatile private var desiredComponent: String? = null
-    @Volatile private var desiredSize: String? = null
+    private val gate = DashFrameGate()
+    private val stateLock = Any()
 
     override fun start() {
         if (running) return
@@ -36,28 +40,54 @@ class DashStreamScreenSource : ScreenSource {
 
     private fun readLoop() {
         while (running) {
+            var activeSocket: Socket? = null
             try {
                 val s = Socket().apply {
                     tcpNoDelay = true
                     connect(InetSocketAddress("127.0.0.1", DashServer.PORT), CONNECT_TIMEOUT_MS)
                 }
+                activeSocket = s
                 socket = s
                 Log.d(TAG, "dash stream: connected to 127.0.0.1:${DashServer.PORT}")
                 syncDesiredState(s)
                 val data = DataInputStream(s.getInputStream().buffered())
                 while (running) {
                     val len = data.readInt()
+                    if (len == DashFrameGate.SIZE_READY_MARKER) {
+                        val revision = data.readInt()
+                        val width = data.readInt()
+                        val height = data.readInt()
+                        val accepted = synchronized(stateLock) {
+                            val ok = s === socket && gate.acknowledge(revision, width, height)
+                            if (ok) latest = null
+                            ok
+                        }
+                        if (accepted) Log.i(TAG, "dash stream: SIZE_READY ${width}x${height} revision=$revision")
+                        continue
+                    }
                     if (len <= 0 || len > MAX_FRAME) throw IllegalStateException("bad frame length $len")
                     val frame = ByteArray(len)
                     data.readFully(frame)
-                    latest = frame
-                    lastFrameAt = SystemClock.elapsedRealtime()
+                    // Check JPEG bounds, not just helper's claim: a bad-size image must
+                    // never reach a CCU, including after a resize or socket reconnect.
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(frame, 0, frame.size, bounds)
+                    synchronized(stateLock) {
+                        if (s === socket && gate.accepts(bounds.outWidth, bounds.outHeight)) {
+                            latest = frame
+                            lastFrameAt = SystemClock.elapsedRealtime()
+                        }
+                    }
                 }
             } catch (t: Throwable) {
                 if (running) Log.d(TAG, "dash stream: ${t.message}, retrying")
             } finally {
-                runCatching { socket?.close() }
-                socket = null
+                synchronized(stateLock) {
+                    gate.pause()
+                    latest = null
+                }
+                runCatching { activeSocket?.close() }
+                if (socket === activeSocket) socket = null
             }
             if (running) Thread.sleep(RETRY_MS)
         }
@@ -70,8 +100,13 @@ class DashStreamScreenSource : ScreenSource {
      * while the dash is actually frozen, and the log tells us whether the helper is gone or just stuck.
      */
     override fun latestFrame(): ByteArray? {
-        val frame = latest ?: return null
-        val age = SystemClock.elapsedRealtime() - lastFrameAt
+        val frame: ByteArray
+        val age: Long
+        synchronized(stateLock) {
+            if (!gate.isReady()) return null
+            frame = latest ?: return null
+            age = SystemClock.elapsedRealtime() - lastFrameAt
+        }
         if (age > STALE_MS) {
             if (!staleLogged) {
                 Log.w(TAG, "dash stream: no new frame for ${age}ms — helper stalled or gone; pausing send (socket=${if (socket != null) "connected" else "down"})")
@@ -89,9 +124,15 @@ class DashStreamScreenSource : ScreenSource {
      * never sends a frame at the previous size (which the dash would reject).
      */
     override fun resizeOutput(width: Int, height: Int) {
-        desiredSize = "$width $height"
-        latest = null
-        send("SIZE $width $height\n")
+        val request = synchronized(stateLock) {
+            latest = null
+            gate.request(width, height)
+        }
+        sendSize(request)
+    }
+
+    private fun sendSize(request: DashSizeRequest) {
+        send("SIZE ${request.width} ${request.height} ${request.revision}\n")
     }
 
     /** Tell the helper to move the foreground app onto the dash display and start encoding. */
@@ -126,7 +167,11 @@ class DashStreamScreenSource : ScreenSource {
     }
 
     private fun syncDesiredState(s: Socket) {
-        desiredSize?.let { send(s, "SIZE $it\n") }
+        val request = synchronized(stateLock) {
+            latest = null
+            gate.reconnect()
+        }
+        request?.let { send(s, "SIZE ${it.width} ${it.height} ${it.revision}\n") }
         val component = desiredComponent
         if (component == null) {
             send(s, "DEMOTE\n")
@@ -153,9 +198,12 @@ class DashStreamScreenSource : ScreenSource {
 
     override fun stop() {
         running = false
+        synchronized(stateLock) {
+            gate.pause()
+            latest = null
+        }
         runCatching { socket?.close() }
         desiredComponent = null
-        latest = null
     }
 
     private companion object {
