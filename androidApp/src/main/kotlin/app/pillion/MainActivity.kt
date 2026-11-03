@@ -9,6 +9,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import app.pillion.android.AndroidDashAppCatalog
 import app.pillion.android.AndroidDashSetup
 import app.pillion.android.AndroidMirrorController
 import app.pillion.android.AndroidSettingsStore
@@ -84,7 +85,7 @@ class MainActivity : ComponentActivity() {
             context = applicationContext,
             requestNotificationPermission = ::requestNotificationPermission,
         )
-        setContent { App(::controllerFor, updateChecker, settingsStore, dashSetup, onStartDash = ::startDash, onStopDash = ::stopMirroring, castMode = CaptureService.mode) }
+        setContent { App(::controllerFor, updateChecker, settingsStore, dashSetup, AndroidDashAppCatalog(applicationContext), onStartDash = ::startDash, onStopDash = ::stopMirroring, castMode = CaptureService.mode) }
     }
 
     /** Resolve the [MirrorController] for the selected head unit (DIP — the UI doesn't know which). */
@@ -132,8 +133,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun launchDashService(settings: MirrorSettings) {
+        val packageName = settingsStore.dashAppPackage() ?: return
+        val component = packageManager.getLaunchIntentForPackage(packageName)?.component ?: return
         val intent = Intent(this, CaptureService::class.java)
             .putExtra(CaptureService.EXTRA_DASH_ENABLED, true)
+            .putExtra(CaptureService.EXTRA_DASH_COMPONENT, component.flattenToString())
             .putExtra(CaptureService.EXTRA_QUALITY, settings.quality)
             .putExtra(CaptureService.EXTRA_MAX_FPS, settings.maxFps)
             .putExtra(CaptureService.EXTRA_DASH_WIDTH, settings.dashResolution.width)

@@ -52,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.pillion.core.AppInfo
+import app.pillion.core.DashApp
 import app.pillion.core.DashResolution
 import app.pillion.core.ThemeMode
 import app.pillion.core.UpdateInfo
@@ -73,6 +74,9 @@ internal fun SettingsScreen(
     dashEnabled: Boolean = false,
     dashResolution: DashResolution = DashResolution.DEFAULT,
     onDashResolution: (DashResolution) -> Unit = {},
+    dashApps: List<DashApp> = emptyList(),
+    selectedDashApp: String? = null,
+    onDashApp: (String?) -> Unit = {},
     onSetUpDash: () -> Unit = {},
     onDisableDash: () -> Unit = {},
     bikeName: String = "",
@@ -229,6 +233,8 @@ internal fun SettingsScreen(
                 }
                 GroupDivider()
                 DashResolutionSelector(dashResolution, onDashResolution)
+                GroupDivider()
+                DashAppSelector(dashApps, selectedDashApp, onDashApp)
             }
             Text(
                 "Casts the real app to the dash in landscape with the screen off. Run setup once " +
@@ -370,6 +376,58 @@ private fun DashResolutionSelector(
                     Text("Cancel")
                 }
             },
+        )
+    }
+}
+
+@Composable
+private fun DashAppSelector(
+    apps: List<DashApp>,
+    selectedPackage: String?,
+    onSelect: (String?) -> Unit,
+) {
+    var choosing by remember { mutableStateOf(false) }
+    val selected = apps.firstOrNull { it.packageName == selectedPackage }
+    Row(
+        Modifier.fillMaxWidth().clickable { choosing = true }.padding(vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("App to display", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                selected?.label ?: if (selectedPackage != null) "Unavailable — select another app" else "Not selected",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text("Change", style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+    }
+    if (choosing) {
+        AlertDialog(
+            onDismissRequest = { choosing = false },
+            title = { Text("App to display") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    if (apps.isEmpty()) Text("No launchable applications found.")
+                    apps.forEach { app ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable {
+                                onSelect(app.packageName)
+                                choosing = false
+                            }.padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(app.label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                            if (app.packageName == selectedPackage)
+                                Icon(Icons.Filled.Check, contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary)
+                        }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { choosing = false }) { Text("Cancel") } },
         )
     }
 }

@@ -4,8 +4,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.app.usage.UsageEvents
-import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -62,7 +60,7 @@ class CaptureService : Service() {
         _state.value = MirrorState.Connecting
         val quality = intent?.getIntExtra(EXTRA_QUALITY, 40) ?: 40
         val fps = intent?.getIntExtra(EXTRA_MAX_FPS, 15) ?: 15
-        if (dashEnabled) startDashSession(quality, fps, dashResolutionFrom(intent))
+        if (dashEnabled) startDashSession(quality, fps, dashResolutionFrom(intent), intent?.getStringExtra(EXTRA_DASH_COMPONENT))
         else startMirrorSession(quality, fps)
         return START_NOT_STICKY
     }
@@ -97,16 +95,20 @@ class CaptureService : Service() {
             // The capture token is single-use: a system revocation must end the
             // mirror session, not leave RFCOMM connected awaiting frames forever.
             if (!stopping && _mode.value == CastMode.MIRROR) {
-                // Release RFCOMM immediately on projection revocation; do not
-                // wait for Service.onDestroy to interrupt an in-flight handshake.
-                // Temporary missing frames without onStop do not trigger this.
+                // Do not wait for Service.onDestroy to release RFCOMM: interrupt an
+                // in-flight handshake or IMAGE_ACK as soon as Android revokes capture.
+                // A mere frame gap (with no onStop callback) does not reach this path.
                 engine?.stop()
                 stopSelf()
             }
         }, fps)
     }
 
-    private fun startDashSession(quality: Int, fps: Int, resolution: DashResolution) {
+    private fun startDashSession(quality: Int, fps: Int, resolution: DashResolution, component: String?) {
+        if (component.isNullOrBlank()) {
+            fail("Select an app to display in Settings")
+            return
+        }
         try {
             startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         } catch (t: Throwable) {
@@ -120,13 +122,8 @@ class CaptureService : Service() {
             runCatching { DashHelper.ensureRunning(this@CaptureService, quality, resolution, preferExisting = true) }
                 .onSuccess {
                     if (!stopping && _mode.value == CastMode.DASH) {
-                        val component = foregroundComponent()
-                        if (component == null) {
-                            fail("No foreground application found — open your navigation app first")
-                        } else {
-                            source.promote(component)
-                            DashHelper.startWatchdog(this@CaptureService, quality, resolution)
-                        }
+                        source.promote(component)
+                        DashHelper.startWatchdog(this@CaptureService, quality, resolution)
                     }
                 }
                 .onFailure {
@@ -136,34 +133,6 @@ class CaptureService : Service() {
                     }
                 }
         }
-    }
-
-    /** The foreground app's launcher component to promote at lock (excludes Pillion). */
-    private fun foregroundComponent(): String? {
-        val usm = getSystemService(UsageStatsManager::class.java) ?: return null
-        val now = System.currentTimeMillis()
-        val events = runCatching { usm.queryEvents(now - 60_000, now) }
-            .onFailure { Log.w(TAG, "dash: usage query failed", it) }
-            .getOrNull() ?: return null
-        val event = UsageEvents.Event()
-        var component: String? = null
-        while (events.hasNextEvent()) {
-            events.getNextEvent(event)
-            @Suppress("DEPRECATION")
-            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND && event.packageName != packageName) {
-                val candidate = packageManager.getLaunchIntentForPackage(event.packageName)
-                    ?.component
-                    ?.flattenToString()
-                if (candidate == null) {
-                    Log.d(TAG, "dash: ignoring foreground package without launcher: ${event.packageName}")
-                } else {
-                    component = candidate
-                    Log.d(TAG, "dash: foreground candidate=$component")
-                }
-            }
-        }
-        if (component == null) Log.w(TAG, "dash: UsageStats returned no launchable foreground app")
-        return component
     }
 
     private fun runEngine(
@@ -305,6 +274,7 @@ class CaptureService : Service() {
         const val EXTRA_MAX_FPS = "maxFps"
         /** When true, the session switches to the dedicated dash display whenever the phone is locked. */
         const val EXTRA_DASH_ENABLED = "dashEnabled"
+        const val EXTRA_DASH_COMPONENT = "dashComponent"
         const val EXTRA_DASH_WIDTH = "dashWidth"
         const val EXTRA_DASH_HEIGHT = "dashHeight"
 
