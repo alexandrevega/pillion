@@ -6,6 +6,7 @@ import android.content.AttributionSource
 import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Canvas
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.VirtualDisplay
@@ -14,6 +15,8 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import app.pillion.core.DashMargins
+import app.pillion.core.DashMarginColor
 import app.pillion.core.DashDpi
 import app.pillion.core.DashCaptureGeometry
 import app.pillion.core.DashFrameGate
@@ -62,7 +65,6 @@ object DashServer {
     private const val FLAG_OWN_CONTENT_ONLY = 1 shl 3
     private const val FLAG_SUPPORTS_TOUCH = 1 shl 6
     private const val FLAG_ROTATES_WITH_CONTENT = 1 shl 7
-    private const val FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS = 1 shl 9
     private const val FLAG_TRUSTED = 1 shl 10
     private const val FLAG_OWN_DISPLAY_GROUP = 1 shl 11
     private const val FLAG_ALWAYS_UNLOCKED = 1 shl 12
@@ -74,7 +76,8 @@ object DashServer {
 
     private const val FLAGS = FLAG_PUBLIC or FLAG_PRESENTATION or FLAG_OWN_CONTENT_ONLY or
         FLAG_SUPPORTS_TOUCH or FLAG_ROTATES_WITH_CONTENT or
-        FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS or FLAG_TRUSTED or FLAG_OWN_DISPLAY_GROUP or
+        // The dedicated VD should not request Android status/navigation bars.
+        FLAG_TRUSTED or FLAG_OWN_DISPLAY_GROUP or
         FLAG_ALWAYS_UNLOCKED or FLAG_TOUCH_FEEDBACK_DISABLED or
         FLAG_OWN_FOCUS or FLAG_DEVICE_DISPLAY_GROUP
 
@@ -91,6 +94,8 @@ object DashServer {
     // Read on the capture/encode thread, written from the control channel (SIZE) — must be volatile.
     @Volatile private var outputWidth = 480
     @Volatile private var outputHeight = 240
+    private var margins = DashMargins()
+    private var marginColor = DashMarginColor.Black
     private var quality = 40
     private var lastEncodeMs = 0L
     private var encodeWindowStartMs = 0L
@@ -284,9 +289,14 @@ object DashServer {
         val h = parts.getOrNull(1)?.toIntOrNull() ?: return null
         val revision = parts.getOrNull(2)?.toIntOrNull() ?: return null
         val requestedDpi = parts.getOrNull(3)?.toIntOrNull() ?: virtualDpi
-        if (w !in 1..4096 || h !in 1..4096 || revision <= 0 ||
+        val left = parts.getOrNull(4)?.toIntOrNull() ?: 0
+        val bottom = parts.getOrNull(5)?.toIntOrNull() ?: 0
+        val requestedColor = DashMarginColor.fromName(parts.getOrNull(6))
+        val requestedMargins = DashMargins.clamped(left, bottom)
+        if (w !in 1..4096 || h !in 1..4096 ||
+            w <= requestedMargins.left || h <= requestedMargins.bottom || revision <= 0 ||
             requestedDpi !in DashDpi.MIN..DashDpi.MAX || requestedDpi % DashDpi.STEP != 0) return null
-        val size = DashCaptureGeometry.forOutput(preferredVirtualWidth, w, h)
+        val size = DashCaptureGeometry.forMargins(preferredVirtualWidth, w, h, requestedMargins)
         val handler = captureHandler ?: return null
         val completion = CountDownLatch(1)
         var successful = false
@@ -316,12 +326,14 @@ object DashServer {
                     (display ?: error("virtual display missing")).resize(size.width, size.height, requestedDpi)
                 }
                 virtualDpi = requestedDpi
+                margins = requestedMargins
+                marginColor = requestedColor
                 outputWidth = w
                 outputHeight = h
                 latestJpeg = null
                 sizeConfigured = true
                 successful = true
-                Log.i(TAG, "VD SIZE_READY revision=$revision virtual=${size.width}x${size.height} output=${w}x$h dpi=$virtualDpi")
+                Log.i(TAG, "VD SIZE_READY revision=$revision virtual=${size.width}x${size.height} output=${w}x$h dpi=$virtualDpi margins=${margins.left},${margins.bottom} color=${marginColor.name}")
             } catch (t: Throwable) {
                 Log.e(TAG, "VD resize failed; frame output held", t)
             } finally {
@@ -696,14 +708,26 @@ object DashServer {
         } else {
             Bitmap.createBitmap(padded, 0, 0, virtualWidth, virtualHeight)
         }
-        val output = if (bitmap.width == outputWidth && bitmap.height == outputHeight) {
+        val usableWidth = outputWidth - margins.left
+        val usableHeight = outputHeight - margins.bottom
+        val scaled = if (bitmap.width == usableWidth && bitmap.height == usableHeight) {
             bitmap
         } else {
-            Bitmap.createScaledBitmap(bitmap, outputWidth, outputHeight, true)
+            Bitmap.createScaledBitmap(bitmap, usableWidth, usableHeight, true)
+        }
+        val output = if (margins.left == 0 && margins.bottom == 0) {
+            scaled
+        } else {
+            Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888).also { target ->
+                val canvas = Canvas(target)
+                canvas.drawColor(marginColor.argb)
+                canvas.drawBitmap(scaled, margins.left.toFloat(), 0f, null)
+            }
         }
         val out = ByteArrayOutputStream()
         output.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        if (output !== bitmap) output.recycle()
+        if (output !== scaled) output.recycle()
+        if (scaled !== bitmap) scaled.recycle()
         if (bitmap !== padded) bitmap.recycle()
         padded.recycle()
         return out.toByteArray()

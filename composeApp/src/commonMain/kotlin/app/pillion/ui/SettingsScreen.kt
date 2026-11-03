@@ -55,6 +55,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.pillion.core.AppInfo
 import app.pillion.core.DashDpi
+import app.pillion.core.DashMargins
+import app.pillion.core.DashMarginColor
 import app.pillion.core.DashApp
 import app.pillion.core.DashResolution
 import app.pillion.core.ThemeMode
@@ -79,6 +81,10 @@ internal fun SettingsScreen(
     onDashResolution: (DashResolution) -> Unit = {},
     dashDpi: Int = DashDpi.DEFAULT,
     onDashDpi: (Int) -> Unit = {},
+    dashMargins: DashMargins = DashMargins(),
+    onDashMargins: (DashMargins) -> Unit = {},
+    dashMarginColor: DashMarginColor = DashMarginColor.Black,
+    onDashMarginColor: (DashMarginColor) -> Unit = {},
     dashApps: List<DashApp> = emptyList(),
     selectedDashApp: String? = null,
     onDashApp: (String?) -> Unit = {},
@@ -241,6 +247,12 @@ internal fun SettingsScreen(
                 GroupDivider()
                 DashDpiSelector(dashDpi, onDashDpi)
                 GroupDivider()
+                PixelMarginSelector("Left margin", dashMargins.left, DashMargins.MAX_LEFT) { onDashMargins(dashMargins.copy(left = it)) }
+                GroupDivider()
+                PixelMarginSelector("Bottom margin", dashMargins.bottom, DashMargins.MAX_BOTTOM) { onDashMargins(dashMargins.copy(bottom = it)) }
+                GroupDivider()
+                MarginColorSelector(dashMarginColor, onDashMarginColor)
+                GroupDivider()
                 DashAppSelector(dashApps, selectedDashApp, onDashApp)
             }
             Text(
@@ -357,6 +369,50 @@ private fun DashDpiSelector(dpi: Int, onDpi: (Int) -> Unit) {
 }
 
 @Composable
+private fun PixelMarginSelector(label: String, px: Int, maximum: Int, onChange: (Int) -> Unit) {
+    val value = px.coerceIn(0, maximum)
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            Text("$value px", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { onChange((value - 1).coerceAtLeast(0)) }, enabled = value > 0, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Filled.Remove, contentDescription = "Decrease $label")
+            }
+            Slider(value = value.toFloat(), onValueChange = { onChange(it.roundToInt().coerceIn(0, maximum)) },
+                valueRange = 0f..maximum.toFloat(), modifier = Modifier.weight(1f))
+            IconButton(onClick = { onChange((value + 1).coerceAtMost(maximum)) }, enabled = value < maximum, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Filled.Add, contentDescription = "Increase $label")
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("0 px", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("$maximum px", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+@Composable
+private fun MarginColorSelector(selected: DashMarginColor, onSelect: (DashMarginColor) -> Unit) {
+    var choosing by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().clickable { choosing = true }.padding(vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Margin color", style = MaterialTheme.typography.bodyLarge)
+            Text(selected.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text("Change", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+    }
+    if (choosing) AlertDialog(onDismissRequest = { choosing = false }, title = { Text("Margin color") },
+        text = { Column { DashMarginColor.values().forEachIndexed { i, option ->
+            Row(Modifier.fillMaxWidth().clickable { onSelect(option); choosing = false }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(option.label, modifier = Modifier.weight(1f))
+                if (selected == option) Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+            }
+            if (i < DashMarginColor.values().lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+        } } },
+        confirmButton = { TextButton(onClick = { choosing = false }) { Text("Cancel") } })
+}
+@Composable
 private fun DashResolutionSelector(
     selected: DashResolution,
     onSelect: (DashResolution) -> Unit,
@@ -370,7 +426,7 @@ private fun DashResolutionSelector(
         Column(Modifier.weight(1f)) {
             Text("Map layout size", style = MaterialTheme.typography.bodyLarge)
             Text(
-                "${selected.label} - ${resolutionDetail(selected)}",
+                "${selected.label} — The image always fits the dashboard.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -389,13 +445,6 @@ private fun DashResolutionSelector(
             title = { Text("Map layout size") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
-                    Text(
-                        "Controls how much of the map fits on the dash. The dash always receives a " +
-                            "480 × 240 image — a larger layout just shows more at once.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
                     DashResolution.values().forEachIndexed { index, option ->
                         ResolutionDialogRow(
                             option = option,
@@ -482,19 +531,17 @@ private fun ResolutionDialogRow(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                option.label,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                resolutionDetail(option),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        Text(
+            when (option) {
+                DashResolution.Scale1 -> "${option.label} — Low detail · lower battery"
+                DashResolution.Balanced -> "${option.label} — Recommended"
+                DashResolution.Scale3 -> "${option.label} — High detail · higher battery"
+                else -> option.label
+            },
+            modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+        )
         if (selected) {
             Icon(
                 Icons.Filled.Check,
@@ -503,17 +550,6 @@ private fun ResolutionDialogRow(
                 modifier = Modifier.size(20.dp),
             )
         }
-    }
-}
-
-private fun resolutionDetail(option: DashResolution): String {
-    val tenths = option.width * 10 / DashResolution.Native.width
-    val scale = if (tenths % 10 == 0) "${tenths / 10}x" else "${tenths / 10}.${tenths % 10}x"
-    return when (option) {
-        DashResolution.Native -> "Matches the dash panel"
-        DashResolution.Balanced -> "Recommended"
-        DashResolution.R1920 -> "Most detail · heaviest on battery"
-        else -> "$scale · more detail"
     }
 }
 

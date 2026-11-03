@@ -2,6 +2,8 @@ package app.pillion.android
 
 import android.content.Context
 import app.pillion.core.DashDpi
+import app.pillion.core.DashMargins
+import app.pillion.core.DashMarginColor
 import app.pillion.core.DashResolution
 import app.pillion.core.SettingsStore
 import app.pillion.core.ThemeMode
@@ -33,6 +35,21 @@ class AndroidSettingsStore(context: Context) : SettingsStore {
 
     override fun dashDpi(): Int = DashDpi.snap(prefs.getInt(KEY_DASH_DPI, DashDpi.DEFAULT))
     override fun setDashDpi(dpi: Int) { prefs.edit().putInt(KEY_DASH_DPI, DashDpi.snap(dpi)).apply() }
+
+    override fun dashMargins(): DashMargins {
+        // Existing saved values (including zero) win over clean-install defaults.
+        val defaults = DashMargins()
+        return DashMargins.clamped(
+            prefs.getInt("dash_left_margin", defaults.left),
+            prefs.getInt("dash_bottom_margin", defaults.bottom),
+        )
+    }
+    override fun setDashMargins(margins: DashMargins) {
+        val safe = DashMargins.clamped(margins.left, margins.bottom)
+        prefs.edit().putInt("dash_left_margin", safe.left).putInt("dash_bottom_margin", safe.bottom).apply()
+    }
+    override fun dashMarginColor() = DashMarginColor.fromName(prefs.getString("dash_margin_color", null))
+    override fun setDashMarginColor(color: DashMarginColor) { prefs.edit().putString("dash_margin_color", color.name).apply() }
 
     override fun dashAppPackage(): String? = prefs.getString(KEY_DASH_APP, null)
 

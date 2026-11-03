@@ -9,17 +9,17 @@ class CoreModelTest {
 
     @Test
     fun dash_resolution_from_name_is_robust() {
-        assertEquals(DashResolution.Wide, DashResolution.fromName("Wide"))
+        assertEquals(DashResolution.Scale26, DashResolution.fromName("Wide"))
         assertEquals(DashResolution.DEFAULT, DashResolution.fromName(null))
         assertEquals(DashResolution.DEFAULT, DashResolution.fromName("nonsense"))
         assertEquals(DashResolution.Balanced, DashResolution.DEFAULT)
     }
 
     @Test
-    fun dash_resolution_label_matches_dimensions() {
-        assertEquals("1280 x 640", DashResolution.Wide.label)
-        assertEquals(1280, DashResolution.Wide.width)
-        assertEquals(640, DashResolution.Wide.height)
+    fun dash_scale_label_and_legacy_conversion_are_consistent() {
+        assertEquals("2.6x", DashResolution.Scale26.label)
+        assertEquals(1248, DashResolution.Scale26.width)
+        assertEquals(624, DashResolution.Scale26.height)
     }
 
     @Test

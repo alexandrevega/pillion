@@ -3,6 +3,8 @@ package app.pillion.android
 import android.graphics.BitmapFactory
 import android.os.SystemClock
 import android.util.Log
+import app.pillion.core.DashMargins
+import app.pillion.core.DashMarginColor
 import app.pillion.core.DashDpi
 import app.pillion.core.DashFrameGate
 import app.pillion.core.DashSizeRequest
@@ -22,7 +24,11 @@ import java.net.Socket
  * the helper is spawned (detached), frames flow with no network. Connection is retried so the app
  * can start before the helper and reconnect freely.
  */
-class DashStreamScreenSource(dpi: Int = DashDpi.DEFAULT) : ScreenSource {
+class DashStreamScreenSource(
+    dpi: Int = DashDpi.DEFAULT,
+    private val margins: DashMargins = DashMargins(),
+    private val marginColor: DashMarginColor = DashMarginColor.Black,
+) : ScreenSource {
     private val sessionDpi = DashDpi.snap(dpi)
     private val thread = Thread(::readLoop).apply { isDaemon = true }
     @Volatile private var running = false
@@ -134,7 +140,7 @@ class DashStreamScreenSource(dpi: Int = DashDpi.DEFAULT) : ScreenSource {
     }
 
     private fun sendSize(request: DashSizeRequest) {
-        send("SIZE ${request.width} ${request.height} ${request.revision} $sessionDpi\n")
+        send("SIZE ${request.width} ${request.height} ${request.revision} $sessionDpi ${margins.left} ${margins.bottom} ${marginColor.name}\n")
     }
 
     /** Tell the helper to move the foreground app onto the dash display and start encoding. */
@@ -173,7 +179,7 @@ class DashStreamScreenSource(dpi: Int = DashDpi.DEFAULT) : ScreenSource {
             latest = null
             gate.reconnect()
         }
-        request?.let { send(s, "SIZE ${it.width} ${it.height} ${it.revision} $sessionDpi\n") }
+        request?.let { send(s, "SIZE ${it.width} ${it.height} ${it.revision} $sessionDpi ${margins.left} ${margins.bottom} ${marginColor.name}\n") }
         val component = desiredComponent
         if (component == null) {
             send(s, "DEMOTE\n")

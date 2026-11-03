@@ -13,6 +13,15 @@ object DashCaptureGeometry {
         return DashCaptureSize(stepW * factor, stepH * factor)
     }
 
+    fun forMargins(preferredWidth: Int, outputWidth: Int, outputHeight: Int, margins: DashMargins): DashCaptureSize {
+        require(preferredWidth > 0 && outputWidth > margins.left && outputHeight > margins.bottom)
+        val usableWidth = outputWidth - margins.left
+        val usableHeight = outputHeight - margins.bottom
+        return DashCaptureSize(
+            (usableWidth * preferredWidth + 240) / 480,
+            (usableHeight * preferredWidth + 240) / 480,
+        )
+    }
     private fun gcd(a: Int, b: Int): Int {
         var x = a
         var y = b
