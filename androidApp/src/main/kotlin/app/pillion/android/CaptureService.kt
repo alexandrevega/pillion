@@ -97,6 +97,10 @@ class CaptureService : Service() {
             // The capture token is single-use: a system revocation must end the
             // mirror session, not leave RFCOMM connected awaiting frames forever.
             if (!stopping && _mode.value == CastMode.MIRROR) {
+                // Release RFCOMM immediately on projection revocation; do not
+                // wait for Service.onDestroy to interrupt an in-flight handshake.
+                // Temporary missing frames without onStop do not trigger this.
+                engine?.stop()
                 stopSelf()
             }
         }, fps)

@@ -53,9 +53,13 @@ class MirrorEngine(
                         _state.value = MirrorState.Connecting
                         Logger.d("session: connecting transport")
                         channel.open()
+                        // Stop may arrive while a blocking RFCOMM connect is in progress.
+                        // Never start a handshake on a transport opened after shutdown.
+                        if (!running) break
                         val reader = FrameReader(channel)
                         Logger.d("session: handshake")
                         val dashSize = Handshake(channel, reader).perform()
+                        if (!running) break
                         Logger.d("session: dash size ${dashSize.width}x${dashSize.height}")
                         screen.resizeOutput(dashSize.width, dashSize.height)
                         connectedOnce = true
