@@ -115,7 +115,7 @@ class CaptureService : Service() {
         }
         val source = DashStreamScreenSource()
         dashSource = source
-        runEngine(source, fps)
+        runEngine(source, fps, retryInitialConnection = true)
         scope.launch(Dispatchers.IO) {
             runCatching { DashHelper.ensureRunning(this@CaptureService, quality, resolution, preferExisting = true) }
                 .onSuccess {
@@ -166,8 +166,12 @@ class CaptureService : Service() {
         return component
     }
 
-    private fun runEngine(screen: ScreenSource, maxFps: Int) {
-        val mirror = MirrorEngine(RfcommByteChannel(), screen, maxFps)
+    private fun runEngine(
+        screen: ScreenSource,
+        maxFps: Int,
+        retryInitialConnection: Boolean = false,
+    ) {
+        val mirror = MirrorEngine(RfcommByteChannel(), screen, maxFps, retryInitialConnection = retryInitialConnection)
         engine = mirror
         scope.launch {
             mirror.state.collect { state ->

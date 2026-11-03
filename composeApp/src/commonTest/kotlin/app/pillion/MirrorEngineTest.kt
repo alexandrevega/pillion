@@ -17,7 +17,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 
 private class FailingChannel : ByteChannel {
-    override fun open() = throw RuntimeException("bike off")
+    @Volatile var attempts = 0
+    override fun open(): Unit {
+        attempts++
+        throw RuntimeException("bike off")
+    }
     override fun write(bytes: ByteArray) {}
     override fun read(buffer: ByteArray): Int = -1
     override fun close() {}
@@ -102,6 +106,26 @@ private fun awaitMirrorCondition(maxMs: Long = 5000, condition: () -> Boolean): 
     return condition()
 }
 
+/** The CCU is initially off, then powers on and completes an ordinary handshake. */
+private class BikePowersOnChannel(private val failuresBeforeSuccess: Int) : ByteChannel {
+    private val connectedChannel = LiveButSilentChannel()
+    @Volatile var openCount = 0
+    @Volatile private var connected = false
+
+    override fun open() {
+        openCount++
+        if (openCount <= failuresBeforeSuccess) throw RuntimeException("bike still off")
+        connectedChannel.open()
+        connected = true
+    }
+
+    override fun write(bytes: ByteArray) = connectedChannel.write(bytes)
+    override fun read(buffer: ByteArray): Int = connectedChannel.read(buffer)
+    override fun close() {
+        if (connected) connectedChannel.close()
+    }
+}
+
 class MirrorEngineTest {
     @Test
     fun initial_connect_failure_ends_in_error_instead_of_reconnecting_forever() {
@@ -112,6 +136,46 @@ class MirrorEngineTest {
         while (engine.state.value !is MirrorState.Error && nowMs() < deadline) sleepMs(20)
         job.cancel()
         assertTrue(engine.state.value is MirrorState.Error, "state was ${engine.state.value}")
+    }
+
+    @Test
+    fun vd_waits_through_initial_failures_then_streams_when_bike_powers_on() {
+        val job = Job()
+        val channel = BikePowersOnChannel(failuresBeforeSuccess = 2)
+        val screen = SilentScreen()
+        val engine = MirrorEngine(channel, screen, retryInitialConnection = true)
+        try {
+            engine.start(CoroutineScope(job))
+            assertTrue(awaitMirrorCondition(7000) { screen.polls > 2 },
+                "VD never reached streaming after CCU powered on")
+            assertEquals(3, channel.openCount, "expected two initial failures then a connection")
+            assertFalse(engine.state.value is MirrorState.Error)
+        } finally {
+            engine.stop()
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun vd_stop_while_waiting_for_ccu_prevents_any_further_attempts() {
+        val job = Job()
+        val channel = FailingChannel()
+        val screen = SilentScreen()
+        val engine = MirrorEngine(channel, screen, retryInitialConnection = true)
+        try {
+            engine.start(CoroutineScope(job))
+            assertTrue(awaitMirrorCondition { channel.attempts > 0 }, "first connect did not run")
+            assertFalse(engine.state.value is MirrorState.Error)
+            engine.stop()
+            assertTrue(awaitMirrorCondition { screen.released }, "source not released by Stop")
+            val countAtStop = channel.attempts
+            sleepMs(1700)
+            assertEquals(countAtStop, channel.attempts, "stopped VD attempted to reconnect")
+            assertEquals(MirrorState.Idle, engine.state.value)
+        } finally {
+            engine.stop()
+            job.cancel()
+        }
     }
 
     @Test

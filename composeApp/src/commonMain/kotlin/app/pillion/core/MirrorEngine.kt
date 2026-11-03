@@ -23,6 +23,8 @@ class MirrorEngine(
     private val screen: ScreenSource,
     private val maxFps: Int = 15,
     private val imageType: Int = 3, // NAVIGATION_EXPANDED
+    // VD can start before the bike is powered on; MediaProjection keeps fail-fast semantics.
+    private val retryInitialConnection: Boolean = false,
 ) {
     private val _state = MutableStateFlow<MirrorState>(MirrorState.Idle)
     val state: StateFlow<MirrorState> = _state.asStateFlow()
@@ -48,9 +50,11 @@ class MirrorEngine(
                 // write mid-stream. Rather than failing the whole session, re-open + re-handshake and
                 // resume, so a drop is a brief reconnect instead of a dead session. Only stop() ends it.
                 var connectedOnce = false
+                var initialFailures = 0
                 while (running) {
                     try {
                         _state.value = MirrorState.Connecting
+                        if (!running) break
                         Logger.d("session: connecting transport")
                         channel.open()
                         // Stop may arrive while a blocking RFCOMM connect is in progress.
@@ -62,16 +66,36 @@ class MirrorEngine(
                         if (!running) break
                         Logger.d("session: dash size ${dashSize.width}x${dashSize.height}")
                         screen.resizeOutput(dashSize.width, dashSize.height)
+                        if (!connectedOnce && initialFailures > 0) {
+                            Logger.d("session: CCU connected after $initialFailures initial failure(s)")
+                        }
                         connectedOnce = true
                         seq = 1 // fresh sequence per (re)connect, matching a new session
                         Logger.d("session: streaming")
                         streamLoop(reader)
                     } catch (t: Throwable) {
                         if (!running) break
-                        if (!connectedOnce) throw t // initial connect failed: surface Error, don't retry forever
-                        Logger.e("session dropped; reconnecting in ${RECONNECT_DELAY_MS}ms", t)
+                        if (!connectedOnce && !retryInitialConnection) {
+                            throw t // normal mirror: first failure remains fatal
+                        }
+                        if (!connectedOnce) {
+                            initialFailures++
+                            // An unpowered bike is expected in VD mode. Log the transition once,
+                            // then only occasional milestones rather than every failed dial.
+                            if (initialFailures == 1 || initialFailures % 10 == 0) {
+                                Logger.d("session: waiting for CCU (initial attempt $initialFailures failed: ${t.javaClass.simpleName})")
+                            }
+                        } else {
+                            Logger.e("session dropped; reconnecting in ${RECONNECT_DELAY_MS}ms", t)
+                        }
                         runCatching { channel.close() }
-                        sleepMs(RECONNECT_DELAY_MS)
+                        // Stop must end a pending initial-connect wait without a long join.
+                        var remaining = RECONNECT_DELAY_MS
+                        while (running && remaining > 0) {
+                            val step = minOf(100L, remaining)
+                            sleepMs(step)
+                            remaining -= step
+                        }
                     }
                 }
             } catch (t: Throwable) {
