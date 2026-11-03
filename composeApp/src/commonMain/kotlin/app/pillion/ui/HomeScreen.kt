@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.pillion.core.MirrorState
+import app.pillion.core.CastMode
 import app.pillion.core.UpdateInfo
 
 @Composable
@@ -48,6 +49,11 @@ internal fun HomeScreen(
     onOpenSettings: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    castMode: CastMode = CastMode.NONE,
+    showDash: Boolean = false,
+    dashReady: Boolean = false,
+    onStartDash: () -> Unit = {},
+    onStopDash: () -> Unit = {},
 ) {
     Column(
         modifier = Modifier.fillMaxSize()
@@ -83,7 +89,13 @@ internal fun HomeScreen(
                 }
             }
         }
-        PrimaryButton(state, onStart, onStop)
+        PrimaryButton(state, onStart, onStop, castMode, CastMode.MIRROR, "Mirror screen", standalone = !showDash)
+        if (showDash) {
+            Spacer(Modifier.height(10.dp))
+            Text(if (dashReady) "Virtual Display" else "Set up Virtual Display in Settings", style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(6.dp))
+            PrimaryButton(state, onStartDash, onStopDash, castMode, CastMode.DASH, "Virtual Display", dashReady)
+        }
     }
 }
 
@@ -246,11 +258,20 @@ private fun StepRow(number: Int, text: String) {
 }
 
 @Composable
-private fun PrimaryButton(state: MirrorState, onStart: () -> Unit, onStop: () -> Unit) {
-    val active = state is MirrorState.Streaming || state is MirrorState.Connecting ||
-        state is MirrorState.Broadcasting
+private fun PrimaryButton(
+    state: MirrorState,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    castMode: CastMode,
+    buttonMode: CastMode,
+    label: String,
+    available: Boolean = true,
+    standalone: Boolean = false,
+) {
+    val active = if (standalone) state is MirrorState.Connecting || state is MirrorState.Streaming || state is MirrorState.Broadcasting else castMode == buttonMode
     Button(
         onClick = if (active) onStop else onStart,
+        enabled = active || (available && castMode == CastMode.NONE),
         modifier = Modifier.fillMaxWidth().height(56.dp),
         shape = RoundedCornerShape(16.dp),
         colors = ButtonDefaults.buttonColors(
@@ -259,7 +280,7 @@ private fun PrimaryButton(state: MirrorState, onStart: () -> Unit, onStop: () ->
         ),
     ) {
         Text(
-            if (active) "Stop mirroring" else "Start mirroring",
+            if (active) "Stop $label" else "Start $label",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
         )

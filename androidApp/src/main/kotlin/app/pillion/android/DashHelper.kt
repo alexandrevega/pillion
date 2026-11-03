@@ -203,10 +203,15 @@ object DashHelper {
         return isRunning()
     }
 
-    private fun waitUntilStopped() {
-        val deadline = System.currentTimeMillis() + START_TIMEOUT_MS
-        while (System.currentTimeMillis() < deadline && isRunning()) {
+    /** Wait until the old helper stops accepting loopback connections. Used before re-spawn and
+     * before releasing the session's Start/Stop exclusion. Bounded to avoid a stuck cleanup.
+     */
+    fun waitUntilStopped(): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + START_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (!isRunning()) return true
             Thread.sleep(100)
         }
+        return !isRunning()
     }
 }

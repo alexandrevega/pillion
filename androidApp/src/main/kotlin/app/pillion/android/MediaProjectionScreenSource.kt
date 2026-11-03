@@ -22,6 +22,7 @@ class MediaProjectionScreenSource(
     private val context: Context,
     private val projection: MediaProjection,
     private val quality: Int = DEFAULT_QUALITY,
+    private val onProjectionStopped: (() -> Unit)? = null,
 ) : ScreenSource {
 
     private val thread = HandlerThread("pillion-capture").apply { start() }
@@ -43,6 +44,7 @@ class MediaProjectionScreenSource(
             override fun onStop() {
                 Log.w(TAG, "screen: projection stopped")
                 releaseCapture("projection_stopped")
+                onProjectionStopped?.invoke()
             }
         }, handler)
         val r = ImageReader.newInstance(WIDTH, HEIGHT, PixelFormat.RGBA_8888, 2)

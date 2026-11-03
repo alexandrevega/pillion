@@ -13,6 +13,9 @@ import app.pillion.core.AppInfo
 import app.pillion.core.DashSetup
 import app.pillion.core.DashResolution
 import app.pillion.core.MirrorController
+import app.pillion.core.CastMode
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import app.pillion.core.MirrorSettings
 import app.pillion.core.SettingsStore
 import app.pillion.core.ThemeMode
@@ -35,6 +38,9 @@ fun App(
     updateChecker: UpdateChecker? = null,
     settingsStore: SettingsStore? = null,
     dashSetup: DashSetup? = null,
+    onStartDash: ((MirrorSettings) -> Unit)? = null,
+    onStopDash: (() -> Unit)? = null,
+    castMode: StateFlow<CastMode> = MutableStateFlow(CastMode.NONE),
 ) {
     var themeMode by remember { mutableStateOf(settingsStore?.themeMode() ?: ThemeMode.SYSTEM) }
     PillionTheme(themeMode) {
@@ -54,13 +60,15 @@ fun App(
 
         val controller = remember(profile.id) { controllerFor(profile) }
         val state by controller.state.collectAsState()
+        val activeMode by castMode.collectAsState()
         var quality by rememberSaveable { mutableStateOf(40) }
         var maxFps by rememberSaveable { mutableStateOf(15) }
         var showSettings by rememberSaveable { mutableStateOf(false) }
         var showDashOnboarding by rememberSaveable { mutableStateOf(false) }
         var dashEnabled by remember { mutableStateOf(settingsStore?.dashEnabled() ?: false) }
         var dashResolution by remember { mutableStateOf(settingsStore?.dashResolution() ?: DashResolution.DEFAULT) }
-        var showDisclaimer by rememberSaveable { mutableStateOf(true) }
+        var showDisclaimer by rememberSaveable { mutableStateOf(false) }
+        var acknowledged by rememberSaveable { mutableStateOf(false) }
         var update by remember { mutableStateOf<UpdateInfo?>(null) }
         var updateDismissed by rememberSaveable { mutableStateOf(false) }
         val uriHandler = LocalUriHandler.current
@@ -108,13 +116,25 @@ fun App(
                 state = state,
                 update = update,
                 onOpenSettings = { showSettings = true },
-                onStart = { controller.start(MirrorSettings(quality, maxFps, dashResolution)) },
+                onStart = {
+                    if (acknowledged) controller.start(MirrorSettings(quality, maxFps, dashResolution))
+                    else showDisclaimer = true
+                },
                 onStop = controller::stop,
+                castMode = activeMode,
+                showDash = onStartDash != null && !profile.requiresUsb,
+                dashReady = dashEnabled,
+                onStartDash = { onStartDash?.invoke(MirrorSettings(quality, maxFps, dashResolution)) },
+                onStopDash = { onStopDash?.invoke() },
             )
         }
 
         if (showDisclaimer) {
-            ExperimentalDialog(onDismiss = { showDisclaimer = false })
+            ExperimentalDialog(onDismiss = {
+                showDisclaimer = false
+                acknowledged = true
+                controller.start(MirrorSettings(quality, maxFps, dashResolution))
+            })
         } else if (update != null && !updateDismissed) {
             UpdateDialog(
                 update = update!!,
