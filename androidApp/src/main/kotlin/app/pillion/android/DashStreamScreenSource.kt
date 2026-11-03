@@ -102,41 +102,43 @@ class DashStreamScreenSource(
     }
 
     /**
-     * The most recent frame — but only if it's *fresh*. If the helper stalls or dies (e.g. wifi /
-     * wireless-debugging drops and it stops producing frames), no new frame arrives over loopback, so
-     * we stop handing the engine the same stale frame. That ends the misleading "still sending Nfps"
-     * while the dash is actually frozen, and the log tells us whether the helper is gone or just stuck.
+     * A static VD may stop publishing new buffers without any transport failure.
+     * Reuse the last validated JPEG for as long as the helper socket is connected.
+     * A disconnected socket, SIZE gate reset, or explicit stop still suspends delivery.
      */
     override fun latestFrame(): ByteArray? {
-        val frame: ByteArray
-        val age: Long
         synchronized(stateLock) {
-            if (!gate.isReady()) return null
-            frame = latest ?: return null
-            age = SystemClock.elapsedRealtime() - lastFrameAt
-        }
-        if (age > STALE_MS) {
-            if (!staleLogged) {
-                Log.w(TAG, "dash stream: no new frame for ${age}ms — helper stalled or gone; pausing send (socket=${if (socket != null) "connected" else "down"})")
-                staleLogged = true
+            if (socket == null || !gate.isReady()) return null
+            val frame = latest ?: return null
+            val age = SystemClock.elapsedRealtime() - lastFrameAt
+            if (age >= STATIC_FRAME_LOG_MS) {
+                if (!staleLogged) {
+                    Log.d(TAG, "dash stream: frame unchanged for ${age}ms; keeping last dash frame (socket=connected)")
+                    staleLogged = true
+                }
+            } else {
+                staleLogged = false
             }
-            return null
+            return frame
         }
-        staleLogged = false
-        return frame
     }
 
     /**
-     * Tell the helper what dash size to encode to, resolved from the CCU part number after the
-     * handshake. Remembered so it replays on reconnect, and the stale frame is dropped so the engine
-     * never sends a frame at the previous size (which the dash would reject).
+     * A Bluetooth reconnect to the same CCU needs a new handshake, not a new VD/JPEG.
+     * Keep the last validated frame when the helper socket and size gate are still ready.
+     * Actual size changes or a helper reconnect still run the original SIZE negotiation.
      */
     override fun resizeOutput(width: Int, height: Int) {
         val request = synchronized(stateLock) {
-            latest = null
-            gate.request(width, height)
+            if (socket != null && latest != null && gate.accepts(width, height)) {
+                Log.i(TAG, "dash stream: SIZE unchanged ${width}x${height}; reusing VD and last JPEG")
+                null
+            } else {
+                latest = null
+                gate.request(width, height)
+            }
         }
-        sendSize(request)
+        request?.let(::sendSize)
     }
 
     private fun sendSize(request: DashSizeRequest) {
@@ -220,7 +222,7 @@ class DashStreamScreenSource(
         const val CONNECT_TIMEOUT_MS = 2000
         const val RETRY_MS = 300L
 
-        /** A frame older than this means the helper stopped producing — pause sending stale frames. */
-        const val STALE_MS = 1000L
+        /** Diagnostic threshold only; a connected helper may keep a static frame indefinitely. */
+        const val STATIC_FRAME_LOG_MS = 1500L
     }
 }

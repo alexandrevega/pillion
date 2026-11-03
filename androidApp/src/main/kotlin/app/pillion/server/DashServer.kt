@@ -22,6 +22,7 @@ import app.pillion.core.DashCaptureGeometry
 import app.pillion.core.DashFrameGate
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import android.util.Log
 import android.view.Surface
 import java.io.BufferedOutputStream
@@ -221,15 +222,18 @@ object DashServer {
             client.tcpNoDelay = true
             val out = DataOutputStream(BufferedOutputStream(client.getOutputStream()))
             val writeLock = Any()
-            Thread { readCommands(client, out, writeLock) }.apply { isDaemon = true; start() }
+            // Each new client must receive SIZE_READY before any cached JPEG.
+            // In particular, a reconnect may inherit a frame from an older TCP session.
+            val sizeReadyForClient = AtomicBoolean(false)
+            Thread { readCommands(client, out, writeLock, sizeReadyForClient) }.apply { isDaemon = true; start() }
             var sentSeq = -1L
             while (!client.isClosed) {
                 val seq = latestSeq
                 val frame = latestJpeg
-                if (frame != null && seq != sentSeq) {
+                if (sizeReadyForClient.get() && frame != null && seq != sentSeq) {
                     synchronized(writeLock) {
-                        // Old frame snapshots must not overtake the SIZE_READY reply.
-                        if (frame === latestJpeg && sizeConfigured) {
+                        // The first frame on this TCP connection must follow SIZE_READY.
+                        if (sizeReadyForClient.get() && frame === latestJpeg && sizeConfigured) {
                             out.writeInt(frame.size)
                             out.write(frame)
                             out.flush()
@@ -247,7 +251,7 @@ object DashServer {
         }
     }
 
-    private fun readCommands(client: Socket, out: DataOutputStream, writeLock: Any) {
+    private fun readCommands(client: Socket, out: DataOutputStream, writeLock: Any, sizeReadyForClient: AtomicBoolean) {
         try {
             val input = client.getInputStream().bufferedReader()
             while (true) {
@@ -256,6 +260,7 @@ object DashServer {
                     line.startsWith("PROMOTE ") -> promoteApp(line.removePrefix("PROMOTE ").trim())
                     line == "DEMOTE" -> demoteApp()
                     line.startsWith("SIZE ") -> {
+                        sizeReadyForClient.set(false)
                         val ready = resizeOutput(line.removePrefix("SIZE ").trim())
                         if (ready != null) {
                             synchronized(writeLock) {
@@ -264,6 +269,9 @@ object DashServer {
                                 out.writeInt(ready.width)
                                 out.writeInt(ready.height)
                                 out.flush()
+                                // Let the writer replay the helper's cached JPEG if unchanged,
+                                // or wait for a new frame if the VD was rebuilt.
+                                sizeReadyForClient.set(true)
                             }
                         }
                     }
@@ -301,9 +309,22 @@ object DashServer {
         val completion = CountDownLatch(1)
         var successful = false
         val posted = handler.post {
-            sizeConfigured = false
-            latestJpeg = null
             try {
+                // An app-side TCP reconnect does not imply a restarted helper/VD.
+                // Keep its last valid JPEG if every rendering parameter still matches.
+                val reuse = sizeConfigured && display != null && captureReader != null &&
+                    capturing && latestJpeg != null &&
+                    virtualWidth == size.width && virtualHeight == size.height &&
+                    outputWidth == w && outputHeight == h &&
+                    virtualDpi == requestedDpi && margins == requestedMargins &&
+                    marginColor == requestedColor
+                if (reuse) {
+                    successful = true
+                    Log.i(TAG, "VD SIZE_REUSE revision=$revision output=${w}x$h; cached JPEG retained")
+                    return@post
+                }
+                sizeConfigured = false
+                latestJpeg = null
                 if (size.width != virtualWidth || size.height != virtualHeight) {
                     val vd = display ?: error("virtual display missing")
                     val newReader = ImageReader.newInstance(
