@@ -35,8 +35,10 @@ class RfcommByteChannel : ByteChannel {
         var lastError: Throwable? = null
         for (dash in candidates) {
             Log.d("Pillion", "rfcomm: connecting to ${dash.name}")
+            var attemptSocket: BluetoothSocket? = null
             try {
                 val s = dash.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+                attemptSocket = s
                 s.connect()
                 socket = s
                 input = s.inputStream
@@ -46,7 +48,7 @@ class RfcommByteChannel : ByteChannel {
             } catch (t: Throwable) {
                 lastError = t
                 Log.d("Pillion", "rfcomm: ${dash.name} unreachable (${t.message}); trying next")
-                runCatching { socket?.close() }
+                runCatching { attemptSocket?.close() }
             }
         }
         throw lastError ?: IllegalStateException("no CCU dash connectable")
