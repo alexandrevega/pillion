@@ -18,10 +18,6 @@
          null even for an app UsageStats just reported (e.g. Maps), so nothing gets promoted. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
-    <!-- Dash mode: listen for real keyguard unlocks so the app returns from the virtual display
-         even when screen-power broadcasts are swallowed by panel-off APIs. -->
-    <uses-permission android:name="android.permission.SUBSCRIBE_TO_KEYGUARD_LOCKED_STATE"
-        tools:ignore="ProtectedPermissions" />
 
     <!-- Bluetooth: connect to the already-bonded dash (no scanning needed).
          NOTE: BLUETOOTH has NO maxSdkVersion — SDL's IntegrationValidator requires it unconditionally

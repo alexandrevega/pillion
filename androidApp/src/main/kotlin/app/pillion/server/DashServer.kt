@@ -707,11 +707,34 @@ object DashServer {
         capturing = false
         stopPanelOffRetries()
         stopHeartbeat()
-        wakeDisplay(0) // requestDisplayPower(ON) cannot restore a still-dozing power group by itself
-        setMainDisplayPower(true) // restore the phone's panel
         latestJpeg = null
-        lastComponent?.let { relocateApp(it, 0) } // move the task back to the phone's own display
-        Log.i(TAG, "demoted to phone")
+        val component = lastComponent
+        lastComponent = null
+        component?.let {
+            // Avoid relaunching an absent app during a power-button return.
+            if (runCatching { taskAndDisplayForPackage(it.substringBefore('/')) }.getOrNull() != null) {
+                relocateApp(it, 0)
+            } else {
+                Log.i(TAG, "demote: task absent; skip app launch")
+            }
+        }
+        // v40: system wake is required. Direct SurfaceFlinger panel ON can leave the
+        // power-group state and physical panel out of sync after pressing POWER.
+        wakePhoneViaKeyEvent()
+        // Trial: restore the physical panel after waking Android to avoid black-but-interactive state.
+        setMainDisplayPower(true)
+        Log.i(TAG, "demoted to phone; requested system wake and panel ON")
+    }
+
+    private fun wakePhoneViaKeyEvent() {
+        val rc = exec("input", "keyevent", "224") // KEYCODE_WAKEUP
+        if (rc == 0) {
+            Log.i(TAG, "wake: KEYCODE_WAKEUP injected")
+        } else {
+            Log.w(TAG, "wake: KEYCODE_WAKEUP failed rc=$rc; fallback to panel restore")
+            wakeDisplay(0)
+            setMainDisplayPower(true)
+        }
     }
 
     private fun toJpeg(image: Image): ByteArray {

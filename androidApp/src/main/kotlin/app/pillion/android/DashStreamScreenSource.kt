@@ -35,8 +35,10 @@ class DashStreamScreenSource(
     @Volatile private var socket: Socket? = null
     @Volatile private var latest: ByteArray? = null
     @Volatile private var lastFrameAt: Long = 0
+    @Volatile private var receiveSeq: Long = 0
     @Volatile private var staleLogged = false
     @Volatile private var desiredComponent: String? = null
+    @Volatile private var explicitDemote = false
     private val gate = DashFrameGate()
     private val stateLock = Any()
 
@@ -83,6 +85,7 @@ class DashStreamScreenSource(
                     synchronized(stateLock) {
                         if (s === socket && gate.accepts(bounds.outWidth, bounds.outHeight)) {
                             latest = frame
+                            receiveSeq++
                             lastFrameAt = SystemClock.elapsedRealtime()
                         }
                     }
@@ -145,15 +148,21 @@ class DashStreamScreenSource(
         send("SIZE ${request.width} ${request.height} ${request.revision} $sessionDpi ${margins.left} ${margins.bottom} ${marginColor.name}\n")
     }
 
+    /** Incremented only after a size-validated helper JPEG is received. */
+    fun receivedFrameSequence(): Long = receiveSeq
+
     /** Tell the helper to move the foreground app onto the dash display and start encoding. */
     fun promote(component: String) {
+        synchronized(stateLock) { latest = null }
         desiredComponent = component
+        explicitDemote = false
         send("PROMOTE $component\n")
     }
 
     /** Tell the helper to move the app back to the phone and stop encoding. */
     fun demote() {
         desiredComponent = null
+        explicitDemote = true
         latest = null
         send("DEMOTE\n")
     }
@@ -184,7 +193,7 @@ class DashStreamScreenSource(
         request?.let { send(s, "SIZE ${it.width} ${it.height} ${it.revision} $sessionDpi ${margins.left} ${margins.bottom} ${marginColor.name}\n") }
         val component = desiredComponent
         if (component == null) {
-            send(s, "DEMOTE\n")
+            if (explicitDemote) send(s, "DEMOTE\n")
         } else {
             Log.d(TAG, "dash stream: syncing pending PROMOTE $component")
             send(s, "PROMOTE $component\n")
