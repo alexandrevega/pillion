@@ -126,7 +126,63 @@ private class BikePowersOnChannel(private val failuresBeforeSuccess: Int) : Byte
     }
 }
 
+/** First connection receives ESN_UPDATE but never SEC_DATA; the retry authenticates. */
+private class StalledHandshakeThenRecoveredChannel : ByteChannel {
+    private val esn = NaviLiteCodec.build(6, ServiceType.ESN_UPDATE, 0, byteArrayOf())
+    private val auth = esn +
+        NaviLiteCodec.build(6, ServiceType.SEC_DATA, 1, ByteArray(16) { (it + 1).toByte() })
+    @Volatile var openCount = 0
+    @Volatile var closeCount = 0
+    private var offset = 0
+    @Volatile private var connectionClosed = true
+
+    override fun open() {
+        openCount++
+        offset = 0
+        connectionClosed = false
+    }
+
+    override fun write(bytes: ByteArray) {}
+
+    override fun read(buffer: ByteArray): Int {
+        val inbound = if (openCount == 1) esn else auth
+        if (connectionClosed) return -1
+        if (offset < inbound.size) {
+            val n = minOf(buffer.size, inbound.size - offset)
+            inbound.copyInto(buffer, 0, offset, offset + n)
+            offset += n
+            return n
+        }
+        while (!connectionClosed) sleepMs(10)
+        return -1
+    }
+
+    override fun close() {
+        closeCount++
+        connectionClosed = true
+    }
+}
+
 class MirrorEngineTest {
+    @Test
+    fun vd_stalled_sec_data_times_out_then_reauthenticates_on_a_fresh_connection() {
+        val job = Job()
+        val channel = StalledHandshakeThenRecoveredChannel()
+        val screen = SilentScreen()
+        val engine = MirrorEngine(channel, screen, retryInitialConnection = true)
+        try {
+            engine.start(CoroutineScope(job))
+            assertTrue(awaitMirrorCondition(9500) { screen.polls > 2 },
+                "VD failed to recover from stalled SEC_DATA handshake")
+            assertEquals(2, channel.openCount, "expected one stalled handshake then a retry")
+            assertTrue(channel.closeCount > 0, "timeout must close the blocking RFCOMM read")
+            assertFalse(engine.state.value is MirrorState.Error)
+        } finally {
+            engine.stop()
+            job.cancel()
+        }
+    }
+
     @Test
     fun initial_connect_failure_ends_in_error_instead_of_reconnecting_forever() {
         val job = Job()

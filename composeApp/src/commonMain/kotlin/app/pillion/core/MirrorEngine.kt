@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
@@ -67,7 +68,7 @@ class MirrorEngine(
                         if (!running) break
                         val reader = FrameReader(channel)
                         Logger.d("session: handshake")
-                        val dashSize = Handshake(channel, reader).perform()
+                        val dashSize = performHandshakeWithTimeout(reader)
                         if (!running) break
                         Logger.d("session: dash size ${dashSize.width}x${dashSize.height}")
                         screen.resizeOutput(dashSize.width, dashSize.height)
@@ -111,6 +112,26 @@ class MirrorEngine(
                 runCatching { screen.stop() }
                 runCatching { channel.close() }
             }
+        }
+    }
+
+    /**
+     * FrameReader uses blocking socket reads, so a coroutine timeout cannot interrupt
+     * a missing ESN_UPDATE / SEC_DATA response. Close RFCOMM from an independent timer:
+     * this unblocks read(), allowing the existing reconnect loop to retry authentication.
+     */
+    private suspend fun performHandshakeWithTimeout(reader: FrameReader): DashSize = coroutineScope {
+        val watchdog = launch(Dispatchers.Default) {
+            delay(HANDSHAKE_TIMEOUT_MS)
+            if (running) {
+                Logger.e("session: HANDSHAKE_TIMEOUT after ${HANDSHAKE_TIMEOUT_MS}ms; reconnecting")
+                runCatching { channel.close() }
+            }
+        }
+        try {
+            Handshake(channel, reader).perform()
+        } finally {
+            watchdog.cancel()
         }
     }
 
@@ -220,6 +241,7 @@ class MirrorEngine(
     private companion object {
         /** Wait between a dropped link and a reconnect attempt (the dash needs a moment to settle). */
         const val RECONNECT_DELAY_MS = 1500L
+        const val HANDSHAKE_TIMEOUT_MS = 5000L
         const val ACK_TIMEOUT_MS = 2000L
     }
 }
