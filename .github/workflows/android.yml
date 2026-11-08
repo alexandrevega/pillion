@@ -11,6 +11,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A newer push to the same branch cancels the in-flight run. Tags get their own group, so a release
+# run is never cancelled by a later branch push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write # the release job attaches the APK to a GitHub Release on v* tags
 

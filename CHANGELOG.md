@@ -27,10 +27,14 @@ isn't ready yet, and testers can now send logs straight from Settings.
   profile connect to the dash over the bike's Wi-Fi hotspot (SDL TCP transport) instead of the USB cable.
   *Scan bike Wi-Fi* finds the dash's gateway and SDL port; the process is bound to the hotspot so traffic
   doesn't leak to mobile data. Reported working on a Tracer 9 GT. Thanks @brunohorta82 (#14).
-- The home screen shows the selected bike/profile (and "via Wi-Fi" when that link is active).
+- The home screen shows the selected bike/profile and the active transport (Bluetooth / USB / Wi-Fi),
+  with the Pillion logo on the header.
 - **Virtual-display controls (Android).** Pin one app to the dash, with persistent app selection, DPI
   and layout margins; system decorations are hidden and a STATUS frame shows while the dash waits for a
   fresh image. Thanks @waiasu (#23).
+- **Handlebar buttons (Android, SDL).** The bike's handlebar buttons drive the mirrored app — up / down /
+  left / right / OK and back/home — synthesized as key presses over the in-app ADB channel, with a
+  log-only fallback when no ADB session is live. Thanks @ArmarosThrane (#19).
 
 ### Changed
 - **Dash helper requires a secret.** The privileged dash helper now only talks to callers that present
@@ -40,6 +44,8 @@ isn't ready yet, and testers can now send logs straight from Settings.
 - **Build:** migrated to AGP 9.0 / the KMP library plugin with the Android app split into `androidApp`
   (thanks @roinuj39, #6); `androidx.fragment` is pinned so release builds pass lint. Removed the inert
   Compatibility-mode toggle.
+- **Legal:** added third-party license notices (`THIRD-PARTY-NOTICES.md`) and hardened `.gitignore`.
+  Thanks @ArmarosThrane (#18).
 
 ### Fixed
 - Starting a session twice (tapping Start again) no longer leaves the first mirror engine, screen capture
