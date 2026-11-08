@@ -1,8 +1,9 @@
 name: Android
 
-# Build + test Android (ubuntu-arm) and compile the shared Kotlin for iOS (macOS).
-# Lint is intentionally not a gate (currently red: see #23). Public repo, so all
-# runners are free — ARM is chosen for speed, not cost.
+# Build + test Android (ubuntu x86) and compile the shared Kotlin for iOS (macOS).
+# Lint is intentionally not a gate (currently red: see #23).
+# NB: must be x86 — AGP 9's aapt2 ships only an x86_64 Linux binary, so ARM runners
+# (ubuntu-*-arm) fail resource processing with "AAPT2 Daemon startup failed".
 on:
   push:
     branches: [main, "release/**"]
@@ -22,7 +23,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -92,7 +93,7 @@ jobs:
     #   ANDROID_KEY_PASSWORD      - key password
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Set up JDK 21
