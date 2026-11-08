@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -397,6 +398,10 @@ class SdlService : Service() {
         releaseWakeLock()
         sdlManager?.dispose()
         sdlManager = null
+        // Release the Wi-Fi process binding on every teardown path (user Stop, SDL error, session end),
+        // not just the explicit Stop button — otherwise a dropped Wi-Fi session strands the whole app on
+        // the bike's internet-less hotspot. No-op when we never bound (USB mode).
+        runCatching { getSystemService(ConnectivityManager::class.java).bindProcessToNetwork(null) }
         SdlSessionState.state.value = MirrorState.Idle
         super.onDestroy()
     }

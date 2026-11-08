@@ -176,19 +176,24 @@ object DiagnosticLogs {
 
     /** Log each access point the first time it shows up — the bike's hotspot or Wi-Fi Direct group among them. */
     fun share(context: Context) {
-        val zip = runCatching { buildZip(context) }.getOrElse {
-            Logger.e("diag: failed to build log zip", it)
-            return
-        }
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.diagfiles", zip)
-        val send = Intent(Intent.ACTION_SEND)
-            .setType("application/zip")
-            .putExtra(Intent.EXTRA_STREAM, uri)
-            .putExtra(Intent.EXTRA_SUBJECT, "Pillion diagnostic logs")
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        context.startActivity(
-            Intent.createChooser(send, "Share Pillion logs").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
+        // Called from a Compose click on the main thread; buildZip runs `logcat -d` + file I/O, so do it
+        // off-thread or it ANRs. The chooser launches with app context + NEW_TASK, fine from a worker.
+        val appContext = context.applicationContext
+        Thread {
+            val zip = runCatching { buildZip(appContext) }.getOrElse {
+                Logger.e("diag: failed to build log zip", it)
+                return@Thread
+            }
+            val uri = FileProvider.getUriForFile(appContext, "${appContext.packageName}.diagfiles", zip)
+            val send = Intent(Intent.ACTION_SEND)
+                .setType("application/zip")
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .putExtra(Intent.EXTRA_SUBJECT, "Pillion diagnostic logs")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            appContext.startActivity(
+                Intent.createChooser(send, "Share Pillion logs").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }.apply { isDaemon = true; name = "diag-share" }.start()
     }
 
     private fun buildZip(context: Context): File {
