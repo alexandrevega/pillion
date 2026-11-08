@@ -8,6 +8,10 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Wireless-debugging setup: keep mDNS visible while discovering adb's pairing port. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- Experimental Wi-Fi link: read the joined network + nearby SSIDs to find the bike's hotspot. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
 
     <!-- Dash mode: find which app to promote when the screen is blocked (the foreground app).
          Special access, granted by the user in Settings → Usage access. -->
@@ -76,6 +80,17 @@
             android:name="app.pillion.android.CaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection|connectedDevice" />
+
+        <!-- Shares the diagnostic log zip from Settings → "Share diagnostic logs". -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="app.pillion.diagfiles"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/diag_paths" />
+        </provider>
 
         <!-- SDL "Path B" (USB full-motion). The SDL session. -->
         <service

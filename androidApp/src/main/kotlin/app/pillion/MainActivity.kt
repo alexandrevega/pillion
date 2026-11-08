@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
+import android.net.ConnectivityManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -13,8 +14,10 @@ import app.pillion.android.AndroidDashAppCatalog
 import app.pillion.android.AndroidDashSetup
 import app.pillion.android.AndroidMirrorController
 import app.pillion.android.AndroidSettingsStore
+import app.pillion.android.AndroidWifiLink
 import app.pillion.android.AdbPairingCoordinator
 import app.pillion.android.CaptureService
+import app.pillion.android.DiagnosticLogs
 import app.pillion.android.GitHubUpdateChecker
 import app.pillion.android.SdlMirrorController
 import app.pillion.android.sdl.ProjectionHolder
@@ -37,6 +40,7 @@ class MainActivity : ComponentActivity() {
     private var pendingSettings = MirrorSettings()
     private var pendingSdl = false // whether the in-flight projection grant is for the SDL/USB path
     private val settingsStore by lazy { AndroidSettingsStore(applicationContext) }
+    private val wifiLink by lazy { AndroidWifiLink(applicationContext, ::requestWifiPermissions) }
 
     private val projectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -71,6 +75,11 @@ class MainActivity : ComponentActivity() {
         if (granted.values.all { it }) requestProjection()
     }
 
+    // Wi-Fi scan works without these; they only add the SSID and nearby networks to the logs.
+    private val wifiPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { }
+
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -85,7 +94,17 @@ class MainActivity : ComponentActivity() {
             context = applicationContext,
             requestNotificationPermission = ::requestNotificationPermission,
         )
-        setContent { App(::controllerFor, updateChecker, settingsStore, dashSetup, AndroidDashAppCatalog(applicationContext), onStartDash = ::startDash, onStopDash = ::stopMirroring, castMode = CaptureService.mode) }
+        setContent {
+            App(
+                ::controllerFor, updateChecker, settingsStore, dashSetup,
+                dashAppCatalog = AndroidDashAppCatalog(applicationContext),
+                onStartDash = ::startDash,
+                onStopDash = ::stopMirroring,
+                castMode = CaptureService.mode,
+                onShareLogs = { DiagnosticLogs.share(this) },
+                wifiLink = wifiLink,
+            )
+        }
     }
 
     /** Resolve the [MirrorController] for the selected head unit (DIP — the UI doesn't know which). */
@@ -158,6 +177,13 @@ class MainActivity : ComponentActivity() {
         val intent = Intent(this, SdlService::class.java)
             .putExtra(SdlService.EXTRA_APP_ID, SdlService.APP_ID_GARMIN)
             .putExtra(SdlService.EXTRA_MIRROR, true)
+        val wifi = wifiLink.target()
+        if (wifi != null) {
+            // The bike's hotspot has no internet, so Android routes via mobile data by default — pin the
+            // process to the Wi-Fi network or the TCP connect to the dash never leaves the phone.
+            getSystemService(ConnectivityManager::class.java).bindProcessToNetwork(wifi.network)
+            intent.putExtra(SdlService.EXTRA_TCP_HOST, wifi.host).putExtra(SdlService.EXTRA_TCP_PORT, wifi.port)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
         else startService(intent)
     }
@@ -166,6 +192,15 @@ class MainActivity : ComponentActivity() {
         // ACTION_STOP (not stopService) so the service latches "user stopped" and the receiver won't
         // auto-revive it while the USB cable is still connected.
         startService(Intent(this, SdlService::class.java).setAction(SdlService.ACTION_STOP))
+        getSystemService(ConnectivityManager::class.java).bindProcessToNetwork(null)
+    }
+
+    private fun requestWifiPermissions() {
+        val wanted = buildList {
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        }.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (wanted.isNotEmpty()) runOnUiThread { wifiPermissionLauncher.launch(wanted.toTypedArray()) }
     }
 
     private fun requiredPermissions(): List<String> = buildList {

@@ -18,6 +18,7 @@ Reported working by the community so far:
 | **MT-09 SP (2026)** | Android | ✅ | — | @raccoon_builds |
 | **XSR900 (2025)** | Pixel 9 Pro / Android 16 | ✅ | ~11–12 | @Turbobrallan |
 | **XMAX (2025)** | Galaxy Z Flip5 / Android 15 | ✅ | ~14 | contributor |
+| **Tracer 9 GT (2026)** — SDL over Wi-Fi, 640×360 H.264 | Galaxy A54 / Android 16 | ✅ | — | community tester |
 
 > **Scooter CCU note.** The XMAX / NMAX scooter CCU (part number `006-B3952-xx`) renders navigation
 > at **480×234**, not the 480×240 the MT-class dashes use. Pillion now detects this from the CCU

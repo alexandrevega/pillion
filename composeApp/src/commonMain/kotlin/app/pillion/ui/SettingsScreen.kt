@@ -38,6 +38,7 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -93,6 +94,12 @@ internal fun SettingsScreen(
     bikeName: String = "",
     onChangeBike: () -> Unit = {},
     update: UpdateInfo?,
+    onShareLogs: (() -> Unit)? = null,
+    wifiSupported: Boolean = false,
+    wifiEnabled: Boolean = false,
+    wifiStatus: String? = null,
+    onWifiEnabled: (Boolean) -> Unit = {},
+    onWifiScan: () -> Unit = {},
     onBack: () -> Unit,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -198,6 +205,54 @@ internal fun SettingsScreen(
             }
         }
 
+        if (wifiSupported) {
+            Spacer(Modifier.height(24.dp))
+            SectionHeader("Wi-Fi link (experimental)")
+            SettingsGroup {
+                Row(
+                    Modifier.fillMaxWidth().clickable { onWifiEnabled(!wifiEnabled) }.padding(vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Connect over Wi-Fi", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Use the bike's Wi-Fi instead of the USB cable.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = wifiEnabled, onCheckedChange = onWifiEnabled)
+                }
+                GroupDivider()
+                Row(
+                    Modifier.fillMaxWidth().clickable(onClick = onWifiScan).padding(vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Scan bike Wi-Fi", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            wifiStatus ?: "Not scanned yet",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        "Scan",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            Text(
+                "Join the bike's Wi-Fi in Android settings first (keep it connected even without internet). " +
+                    "The dash is found automatically; scan only if it doesn't connect (takes a few minutes).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 6.dp, top = 8.dp, end = 6.dp),
+            )
+        }
+
         Spacer(Modifier.height(24.dp))
         SectionHeader("Mirroring")
         SettingsGroup {
@@ -273,6 +328,10 @@ internal fun SettingsScreen(
             GroupDivider()
             LinkRow("Report an issue") { uriHandler.openUri("$REPO_URL/issues") }
             GroupDivider()
+            if (onShareLogs != null) {
+                LinkRow("Share diagnostic logs") { onShareLogs() }
+                GroupDivider()
+            }
             LinkRow("Changelog") { uriHandler.openUri("$REPO_URL/blob/main/CHANGELOG.md") }
             GroupDivider()
             LinkRow("Third-party notices") { uriHandler.openUri("$REPO_URL/blob/main/THIRD-PARTY-NOTICES.md") }

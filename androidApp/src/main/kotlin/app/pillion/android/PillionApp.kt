@@ -1,8 +1,10 @@
 package app.pillion.android
 
 import android.app.Application
+import android.os.Build
 import app.pillion.core.Logger
 import com.smartdevicelink.util.DebugTool
+import java.io.File
 
 /**
  * Application for the Android app. Enables SDL's internal logging and installs a guard against a known
@@ -14,7 +16,13 @@ class PillionApp : Application() {
         super.onCreate()
         DebugTool.enableDebugTool()
         installSdlCrashGuard()
+        // The SDL router runs in its own process with this same Application; capture only once.
+        if (currentProcessName() == packageName) DiagnosticLogs.start(this)
     }
+
+    private fun currentProcessName(): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) getProcessName()
+        else runCatching { File("/proc/self/cmdline").readText().trimEnd('\u0000') }.getOrDefault(packageName)
 
     private fun installSdlCrashGuard() {
         val prev = Thread.getDefaultUncaughtExceptionHandler()
