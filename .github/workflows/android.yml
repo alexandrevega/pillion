@@ -53,9 +53,12 @@ jobs:
   ios-compile:
     # Shared Kotlin must also compile for Kotlin/Native (iOS). Catches JVM-only APIs leaking into
     # commonMain (e.g. javaClass, Dispatchers.IO) that the Android build happily accepts.
-    # NOTE: Apple jobs NEVER code-sign. Distribution is via SideStore (on-device resigning), so any
-    # future IPA build here stays UNSIGNED (CODE_SIGNING_ALLOWED=NO, no provisioning profile) — no
-    # signing certs/TestFlight in CI. This job is compile-only and already signs nothing.
+    # NOTE: no Apple DEV cert / provisioning / TestFlight in CI — distribution is via SideStore
+    # (on-device re-sign). A future IPA job must follow iosApp/build-ipa.sh, NOT just build unsigned:
+    # Xcode build with CODE_SIGNING_ALLOWED=NO, then ad-hoc sign inside-out (appex first) WITH
+    # --entitlements so the App Group survives and the re-signer replaces (not synthesizes) the appex
+    # seal. A fully-unsigned IPA SIGKILLs the broadcast extension and strips the App Group.
+    # This job is Kotlin/Native compile-only and produces no IPA.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
