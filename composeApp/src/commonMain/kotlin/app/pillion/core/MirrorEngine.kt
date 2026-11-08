@@ -89,7 +89,7 @@ class MirrorEngine(
                             // An unpowered bike is expected in VD mode. Log the transition once,
                             // then only occasional milestones rather than every failed dial.
                             if (initialFailures == 1 || initialFailures % 10 == 0) {
-                                Logger.d("session: waiting for CCU (initial attempt $initialFailures failed: ${t.javaClass.simpleName})")
+                                Logger.d("session: waiting for CCU (initial attempt $initialFailures failed: ${t::class.simpleName})")
                             }
                         } else {
                             Logger.e("session dropped; reconnecting in ${RECONNECT_DELAY_MS}ms", t)
@@ -146,7 +146,7 @@ class MirrorEngine(
         // FrameReader.next() is blocking I/O: a coroutine timeout around it would not interrupt
         // the read. Keep a single dedicated reader and let the sender time out on its channel.
         val incomingFrames = Channel<NaviFrameView>(Channel.BUFFERED)
-        val receiver = launch(Dispatchers.IO) {
+        val receiver = launch(ioDispatcher) {
             try {
                 while (running && isActive) incomingFrames.send(reader.next())
             } catch (t: Throwable) {

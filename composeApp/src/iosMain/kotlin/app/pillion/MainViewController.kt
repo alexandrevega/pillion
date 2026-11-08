@@ -32,7 +32,7 @@ fun MainViewController(
             },
             updateChecker = null,
             settingsStore = IosSettingsStore(),
-            onShareDebugLog = onShareDebugLog,
+            onShareLogs = onShareDebugLog,
         )
     }
 }
