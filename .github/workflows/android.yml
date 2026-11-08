@@ -52,8 +52,10 @@ jobs:
 
   ios-compile:
     # Shared Kotlin must also compile for Kotlin/Native (iOS). Catches JVM-only APIs leaking into
-    # commonMain (e.g. javaClass, Dispatchers.IO) that the Android build happily accepts. A full
-    # xcodebuild/signing/TestFlight step is a later addition; this is the cheap regression gate.
+    # commonMain (e.g. javaClass, Dispatchers.IO) that the Android build happily accepts.
+    # NOTE: Apple jobs NEVER code-sign. Distribution is via SideStore (on-device resigning), so any
+    # future IPA build here stays UNSIGNED (CODE_SIGNING_ALLOWED=NO, no provisioning profile) — no
+    # signing certs/TestFlight in CI. This job is compile-only and already signs nothing.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
