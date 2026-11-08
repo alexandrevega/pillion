@@ -16,7 +16,7 @@ object NaviLiteProfile : HeadUnitProfile {
     override val videoPreference = VideoPreference.JpegSlideshow(quality = 40)
     override val identity: AppIdentity? = null
     override val compatibleApp = "StreetCross"
-    override val exampleBikes = "MT-07 · MT-09 · XSR900 · R9 · Tracer — any bike that uses the StreetCross app"
+    override val exampleBikes = "MT-07 · MT-09 · XSR900 · R7 · R9 · Tracer 7 · XMAX — any bike that uses the StreetCross app"
 }
 
 /** Yamaha SDL / Motorize-compatible — USB full-motion H.264 (Path B). Proven on a real Tracer. */
@@ -28,7 +28,7 @@ object SdlProfile : HeadUnitProfile {
     override val requiresUsb = true
     override val videoPreference = VideoPreference.H264(maxBitrateBps = null) // resolved from the dash's caps
     override val compatibleApp = "Motorize"
-    override val exampleBikes = "Tracer 9 GT+ and other bikes with a USB Garmin dash (Motorize app)"
+    override val exampleBikes = "Tracer 9 GT · GT+ · TMAX — bikes with a USB Garmin dash (Motorize app)"
     // The identity the Tracer accepts (proven). For DISTRIBUTION this should be user-supplied
     // (bring-your-own-identity, see docs/ARCHITECTURE_HEADUNITS.md) rather than baked in; kept here so
     // the launch build connects out of the box for testing.
