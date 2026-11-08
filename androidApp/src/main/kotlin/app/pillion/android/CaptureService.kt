@@ -130,7 +130,7 @@ class CaptureService : Service() {
             fail("VD foreground service unavailable")
             return
         }
-        val source = DashStreamScreenSource(dpi, margins, marginColor)
+        val source = DashStreamScreenSource(this, dpi, margins, marginColor)
         dashSource = source
         val modeSource = DashModeScreenSource(source)
         dashModeSource = modeSource
