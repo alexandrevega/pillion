@@ -23,7 +23,7 @@ class SwitchableScreenSource(
     }
 
     override fun latestFrame(): ByteArray? =
-        if (useDash) dash.latestFrame() ?: mirror.latestFrame() else mirror.latestFrame()
+        if (useDash) dash.latestFrame() else mirror.latestFrame()
 
     override fun stop() {
         runCatching { mirror.stop() }

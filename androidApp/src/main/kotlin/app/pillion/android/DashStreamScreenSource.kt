@@ -1,7 +1,13 @@
 package app.pillion.android
 
+import android.graphics.BitmapFactory
 import android.os.SystemClock
 import android.util.Log
+import app.pillion.core.DashMargins
+import app.pillion.core.DashMarginColor
+import app.pillion.core.DashDpi
+import app.pillion.core.DashFrameGate
+import app.pillion.core.DashSizeRequest
 import app.pillion.core.ScreenSource
 import app.pillion.server.DashServer
 import java.io.DataInputStream
@@ -18,15 +24,23 @@ import java.net.Socket
  * the helper is spawned (detached), frames flow with no network. Connection is retried so the app
  * can start before the helper and reconnect freely.
  */
-class DashStreamScreenSource : ScreenSource {
+class DashStreamScreenSource(
+    dpi: Int = DashDpi.DEFAULT,
+    private val margins: DashMargins = DashMargins(),
+    private val marginColor: DashMarginColor = DashMarginColor.Black,
+) : ScreenSource {
+    private val sessionDpi = DashDpi.snap(dpi)
     private val thread = Thread(::readLoop).apply { isDaemon = true }
     @Volatile private var running = false
     @Volatile private var socket: Socket? = null
     @Volatile private var latest: ByteArray? = null
     @Volatile private var lastFrameAt: Long = 0
+    @Volatile private var receiveSeq: Long = 0
     @Volatile private var staleLogged = false
     @Volatile private var desiredComponent: String? = null
-    @Volatile private var desiredSize: String? = null
+    @Volatile private var explicitDemote = false
+    private val gate = DashFrameGate()
+    private val stateLock = Any()
 
     override fun start() {
         if (running) return
@@ -36,73 +50,119 @@ class DashStreamScreenSource : ScreenSource {
 
     private fun readLoop() {
         while (running) {
+            var activeSocket: Socket? = null
             try {
                 val s = Socket().apply {
                     tcpNoDelay = true
                     connect(InetSocketAddress("127.0.0.1", DashServer.PORT), CONNECT_TIMEOUT_MS)
                 }
+                activeSocket = s
                 socket = s
                 Log.d(TAG, "dash stream: connected to 127.0.0.1:${DashServer.PORT}")
                 syncDesiredState(s)
                 val data = DataInputStream(s.getInputStream().buffered())
                 while (running) {
                     val len = data.readInt()
+                    if (len == DashFrameGate.SIZE_READY_MARKER) {
+                        val revision = data.readInt()
+                        val width = data.readInt()
+                        val height = data.readInt()
+                        val accepted = synchronized(stateLock) {
+                            val ok = s === socket && gate.acknowledge(revision, width, height)
+                            if (ok) latest = null
+                            ok
+                        }
+                        if (accepted) Log.i(TAG, "dash stream: SIZE_READY ${width}x${height} revision=$revision")
+                        continue
+                    }
                     if (len <= 0 || len > MAX_FRAME) throw IllegalStateException("bad frame length $len")
                     val frame = ByteArray(len)
                     data.readFully(frame)
-                    latest = frame
-                    lastFrameAt = SystemClock.elapsedRealtime()
+                    // Check JPEG bounds, not just helper's claim: a bad-size image must
+                    // never reach a CCU, including after a resize or socket reconnect.
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(frame, 0, frame.size, bounds)
+                    synchronized(stateLock) {
+                        if (s === socket && gate.accepts(bounds.outWidth, bounds.outHeight)) {
+                            latest = frame
+                            receiveSeq++
+                            lastFrameAt = SystemClock.elapsedRealtime()
+                        }
+                    }
                 }
             } catch (t: Throwable) {
                 if (running) Log.d(TAG, "dash stream: ${t.message}, retrying")
             } finally {
-                runCatching { socket?.close() }
-                socket = null
+                synchronized(stateLock) {
+                    gate.pause()
+                    latest = null
+                }
+                runCatching { activeSocket?.close() }
+                if (socket === activeSocket) socket = null
             }
             if (running) Thread.sleep(RETRY_MS)
         }
     }
 
     /**
-     * The most recent frame — but only if it's *fresh*. If the helper stalls or dies (e.g. wifi /
-     * wireless-debugging drops and it stops producing frames), no new frame arrives over loopback, so
-     * we stop handing the engine the same stale frame. That ends the misleading "still sending Nfps"
-     * while the dash is actually frozen, and the log tells us whether the helper is gone or just stuck.
+     * A static VD may stop publishing new buffers without any transport failure.
+     * Reuse the last validated JPEG for as long as the helper socket is connected.
+     * A disconnected socket, SIZE gate reset, or explicit stop still suspends delivery.
      */
     override fun latestFrame(): ByteArray? {
-        val frame = latest ?: return null
-        val age = SystemClock.elapsedRealtime() - lastFrameAt
-        if (age > STALE_MS) {
-            if (!staleLogged) {
-                Log.w(TAG, "dash stream: no new frame for ${age}ms — helper stalled or gone; pausing send (socket=${if (socket != null) "connected" else "down"})")
-                staleLogged = true
+        synchronized(stateLock) {
+            if (socket == null || !gate.isReady()) return null
+            val frame = latest ?: return null
+            val age = SystemClock.elapsedRealtime() - lastFrameAt
+            if (age >= STATIC_FRAME_LOG_MS) {
+                if (!staleLogged) {
+                    Log.d(TAG, "dash stream: frame unchanged for ${age}ms; keeping last dash frame (socket=connected)")
+                    staleLogged = true
+                }
+            } else {
+                staleLogged = false
             }
-            return null
+            return frame
         }
-        staleLogged = false
-        return frame
     }
 
     /**
-     * Tell the helper what dash size to encode to, resolved from the CCU part number after the
-     * handshake. Remembered so it replays on reconnect, and the stale frame is dropped so the engine
-     * never sends a frame at the previous size (which the dash would reject).
+     * A Bluetooth reconnect to the same CCU needs a new handshake, not a new VD/JPEG.
+     * Keep the last validated frame when the helper socket and size gate are still ready.
+     * Actual size changes or a helper reconnect still run the original SIZE negotiation.
      */
     override fun resizeOutput(width: Int, height: Int) {
-        desiredSize = "$width $height"
-        latest = null
-        send("SIZE $width $height\n")
+        val request = synchronized(stateLock) {
+            if (socket != null && latest != null && gate.accepts(width, height)) {
+                Log.i(TAG, "dash stream: SIZE unchanged ${width}x${height}; reusing VD and last JPEG")
+                null
+            } else {
+                latest = null
+                gate.request(width, height)
+            }
+        }
+        request?.let(::sendSize)
     }
+
+    private fun sendSize(request: DashSizeRequest) {
+        send("SIZE ${request.width} ${request.height} ${request.revision} $sessionDpi ${margins.left} ${margins.bottom} ${marginColor.name}\n")
+    }
+
+    /** Incremented only after a size-validated helper JPEG is received. */
+    fun receivedFrameSequence(): Long = receiveSeq
 
     /** Tell the helper to move the foreground app onto the dash display and start encoding. */
     fun promote(component: String) {
+        synchronized(stateLock) { latest = null }
         desiredComponent = component
+        explicitDemote = false
         send("PROMOTE $component\n")
     }
 
     /** Tell the helper to move the app back to the phone and stop encoding. */
     fun demote() {
         desiredComponent = null
+        explicitDemote = true
         latest = null
         send("DEMOTE\n")
     }
@@ -126,10 +186,14 @@ class DashStreamScreenSource : ScreenSource {
     }
 
     private fun syncDesiredState(s: Socket) {
-        desiredSize?.let { send(s, "SIZE $it\n") }
+        val request = synchronized(stateLock) {
+            latest = null
+            gate.reconnect()
+        }
+        request?.let { send(s, "SIZE ${it.width} ${it.height} ${it.revision} $sessionDpi ${margins.left} ${margins.bottom} ${marginColor.name}\n") }
         val component = desiredComponent
         if (component == null) {
-            send(s, "DEMOTE\n")
+            if (explicitDemote) send(s, "DEMOTE\n")
         } else {
             Log.d(TAG, "dash stream: syncing pending PROMOTE $component")
             send(s, "PROMOTE $component\n")
@@ -153,9 +217,12 @@ class DashStreamScreenSource : ScreenSource {
 
     override fun stop() {
         running = false
+        synchronized(stateLock) {
+            gate.pause()
+            latest = null
+        }
         runCatching { socket?.close() }
         desiredComponent = null
-        latest = null
     }
 
     private companion object {
@@ -164,7 +231,7 @@ class DashStreamScreenSource : ScreenSource {
         const val CONNECT_TIMEOUT_MS = 2000
         const val RETRY_MS = 300L
 
-        /** A frame older than this means the helper stopped producing — pause sending stale frames. */
-        const val STALE_MS = 1000L
+        /** Diagnostic threshold only; a connected helper may keep a static frame indefinitely. */
+        const val STATIC_FRAME_LOG_MS = 1500L
     }
 }

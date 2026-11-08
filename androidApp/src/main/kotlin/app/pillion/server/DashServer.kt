@@ -6,6 +6,7 @@ import android.content.AttributionSource
 import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Canvas
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.VirtualDisplay
@@ -14,6 +15,14 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import app.pillion.core.DashMargins
+import app.pillion.core.DashMarginColor
+import app.pillion.core.DashDpi
+import app.pillion.core.DashCaptureGeometry
+import app.pillion.core.DashFrameGate
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import android.util.Log
 import android.view.Surface
 import java.io.BufferedOutputStream
@@ -57,7 +66,6 @@ object DashServer {
     private const val FLAG_OWN_CONTENT_ONLY = 1 shl 3
     private const val FLAG_SUPPORTS_TOUCH = 1 shl 6
     private const val FLAG_ROTATES_WITH_CONTENT = 1 shl 7
-    private const val FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS = 1 shl 9
     private const val FLAG_TRUSTED = 1 shl 10
     private const val FLAG_OWN_DISPLAY_GROUP = 1 shl 11
     private const val FLAG_ALWAYS_UNLOCKED = 1 shl 12
@@ -69,7 +77,8 @@ object DashServer {
 
     private const val FLAGS = FLAG_PUBLIC or FLAG_PRESENTATION or FLAG_OWN_CONTENT_ONLY or
         FLAG_SUPPORTS_TOUCH or FLAG_ROTATES_WITH_CONTENT or
-        FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS or FLAG_TRUSTED or FLAG_OWN_DISPLAY_GROUP or
+        // The dedicated VD should not request Android status/navigation bars.
+        FLAG_TRUSTED or FLAG_OWN_DISPLAY_GROUP or
         FLAG_ALWAYS_UNLOCKED or FLAG_TOUCH_FEEDBACK_DISABLED or
         FLAG_OWN_FOCUS or FLAG_DEVICE_DISPLAY_GROUP
 
@@ -77,9 +86,17 @@ object DashServer {
 
     private var virtualWidth = 480
     private var virtualHeight = 240
+    private var preferredVirtualWidth = 480
+    private var virtualDpi = 160
+    private var display: VirtualDisplay? = null
+    private var captureReader: ImageReader? = null
+    private var captureHandler: Handler? = null
+    @Volatile private var sizeConfigured = false
     // Read on the capture/encode thread, written from the control channel (SIZE) — must be volatile.
     @Volatile private var outputWidth = 480
     @Volatile private var outputHeight = 240
+    private var margins = DashMargins()
+    private var marginColor = DashMarginColor.Black
     private var quality = 40
     private var lastEncodeMs = 0L
     private var encodeWindowStartMs = 0L
@@ -107,7 +124,9 @@ object DashServer {
 
         virtualWidth = args.getOrNull(0)?.toIntOrNull() ?: 480
         virtualHeight = args.getOrNull(1)?.toIntOrNull() ?: 240
+        preferredVirtualWidth = virtualWidth
         val dpi = args.getOrNull(2)?.toIntOrNull() ?: 160
+        virtualDpi = dpi
         quality = args.getOrNull(3)?.toIntOrNull() ?: 40
         val outputArg = args.getOrNull(4)?.toIntOrNull()
         outputWidth = outputArg ?: 480
@@ -119,9 +138,11 @@ object DashServer {
             val context = ShellContext(systemContext())
             val captureThread = HandlerThread("pillion-capture").apply { start() }
             val handler = Handler(captureThread.looper)
+            captureHandler = handler
 
             val reader = ImageReader.newInstance(virtualWidth, virtualHeight, PixelFormat.RGBA_8888, 2)
             reader.setOnImageAvailableListener({ ir -> onImage(ir) }, handler)
+            captureReader = reader
 
             val display = createTrustedVirtualDisplay(
                 context,
@@ -131,6 +152,7 @@ object DashServer {
                 dpi,
                 reader.surface,
             )
+            this.display = display
             displayId = display.display.displayId
             Log.i(
                 TAG,
@@ -155,9 +177,10 @@ object DashServer {
      * drain frames without encoding, so an unlocked phone (mirroring instead) costs no extra battery.
      */
     private fun onImage(reader: ImageReader) {
-        val image = reader.acquireLatestImage() ?: return
+        if (reader !== captureReader) return
+        val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return
         try {
-            if (!capturing) return
+            if (!capturing || !sizeConfigured) return
             val now = System.currentTimeMillis()
             if (now - lastEncodeMs < MIN_INTERVAL_MS) return
             lastEncodeMs = now
@@ -195,19 +218,28 @@ object DashServer {
 
     private fun serveClient(client: Socket) {
         // Reverse channel: the app sends "PROMOTE <component>" on screen-off and "DEMOTE" on unlock.
-        Thread { readCommands(client) }.apply { isDaemon = true; start() }
         try {
             client.tcpNoDelay = true
             val out = DataOutputStream(BufferedOutputStream(client.getOutputStream()))
+            val writeLock = Any()
+            // Each new client must receive SIZE_READY before any cached JPEG.
+            // In particular, a reconnect may inherit a frame from an older TCP session.
+            val sizeReadyForClient = AtomicBoolean(false)
+            Thread { readCommands(client, out, writeLock, sizeReadyForClient) }.apply { isDaemon = true; start() }
             var sentSeq = -1L
             while (!client.isClosed) {
                 val seq = latestSeq
                 val frame = latestJpeg
-                if (frame != null && seq != sentSeq) {
-                    out.writeInt(frame.size)
-                    out.write(frame)
-                    out.flush()
-                    sentSeq = seq
+                if (sizeReadyForClient.get() && frame != null && seq != sentSeq) {
+                    synchronized(writeLock) {
+                        // The first frame on this TCP connection must follow SIZE_READY.
+                        if (sizeReadyForClient.get() && frame === latestJpeg && sizeConfigured) {
+                            out.writeInt(frame.size)
+                            out.write(frame)
+                            out.flush()
+                            sentSeq = seq
+                        }
+                    }
                 } else {
                     Thread.sleep(10)
                 }
@@ -219,7 +251,7 @@ object DashServer {
         }
     }
 
-    private fun readCommands(client: Socket) {
+    private fun readCommands(client: Socket, out: DataOutputStream, writeLock: Any, sizeReadyForClient: AtomicBoolean) {
         try {
             val input = client.getInputStream().bufferedReader()
             while (true) {
@@ -227,7 +259,22 @@ object DashServer {
                 when {
                     line.startsWith("PROMOTE ") -> promoteApp(line.removePrefix("PROMOTE ").trim())
                     line == "DEMOTE" -> demoteApp()
-                    line.startsWith("SIZE ") -> resizeOutput(line.removePrefix("SIZE ").trim())
+                    line.startsWith("SIZE ") -> {
+                        sizeReadyForClient.set(false)
+                        val ready = resizeOutput(line.removePrefix("SIZE ").trim())
+                        if (ready != null) {
+                            synchronized(writeLock) {
+                                out.writeInt(DashFrameGate.SIZE_READY_MARKER)
+                                out.writeInt(ready.revision)
+                                out.writeInt(ready.width)
+                                out.writeInt(ready.height)
+                                out.flush()
+                                // Let the writer replay the helper's cached JPEG if unchanged,
+                                // or wait for a new frame if the VD was rebuilt.
+                                sizeReadyForClient.set(true)
+                            }
+                        }
+                    }
                     line == "QUIT" -> shutdown()
                 }
             }
@@ -241,19 +288,84 @@ object DashServer {
     }
 
     /**
-     * Resize the JPEG output to the dash's native size, resolved by the app from the CCU part number
-     * after the NaviLite handshake (e.g. 480x234 for the XMAX/NMAX scooter CCU). The trusted display
-     * keeps its render size; only the encoded frames are rescaled, from the next frame on.
+     * Apply CCU geometry to the existing VD and ImageReader. The task stays on the
+     * same displayId. Reply SIZE_READY only after capture-thread reconfiguration ends.
      */
-    private fun resizeOutput(arg: String) {
+    private fun resizeOutput(arg: String): SizeReady? {
         val parts = arg.split(' ')
-        val w = parts.getOrNull(0)?.toIntOrNull() ?: return
-        val h = parts.getOrNull(1)?.toIntOrNull() ?: return
-        if (w <= 0 || h <= 0 || (w == outputWidth && h == outputHeight)) return
-        outputWidth = w
-        outputHeight = h
-        Log.i(TAG, "output resized to ${w}x$h")
+        val w = parts.getOrNull(0)?.toIntOrNull() ?: return null
+        val h = parts.getOrNull(1)?.toIntOrNull() ?: return null
+        val revision = parts.getOrNull(2)?.toIntOrNull() ?: return null
+        val requestedDpi = parts.getOrNull(3)?.toIntOrNull() ?: virtualDpi
+        val left = parts.getOrNull(4)?.toIntOrNull() ?: 0
+        val bottom = parts.getOrNull(5)?.toIntOrNull() ?: 0
+        val requestedColor = DashMarginColor.fromName(parts.getOrNull(6))
+        val requestedMargins = DashMargins.clamped(left, bottom)
+        if (w !in 1..4096 || h !in 1..4096 ||
+            w <= requestedMargins.left || h <= requestedMargins.bottom || revision <= 0 ||
+            requestedDpi !in DashDpi.MIN..DashDpi.MAX || requestedDpi % DashDpi.STEP != 0) return null
+        val size = DashCaptureGeometry.forMargins(preferredVirtualWidth, w, h, requestedMargins)
+        val handler = captureHandler ?: return null
+        val completion = CountDownLatch(1)
+        var successful = false
+        val posted = handler.post {
+            try {
+                // An app-side TCP reconnect does not imply a restarted helper/VD.
+                // Keep its last valid JPEG if every rendering parameter still matches.
+                val reuse = sizeConfigured && display != null && captureReader != null &&
+                    capturing && latestJpeg != null &&
+                    virtualWidth == size.width && virtualHeight == size.height &&
+                    outputWidth == w && outputHeight == h &&
+                    virtualDpi == requestedDpi && margins == requestedMargins &&
+                    marginColor == requestedColor
+                if (reuse) {
+                    successful = true
+                    Log.i(TAG, "VD SIZE_REUSE revision=$revision output=${w}x$h; cached JPEG retained")
+                    return@post
+                }
+                sizeConfigured = false
+                latestJpeg = null
+                if (size.width != virtualWidth || size.height != virtualHeight) {
+                    val vd = display ?: error("virtual display missing")
+                    val newReader = ImageReader.newInstance(
+                        size.width, size.height, PixelFormat.RGBA_8888, 2,
+                    )
+                    try {
+                        newReader.setOnImageAvailableListener({ ir -> onImage(ir) }, handler)
+                        vd.resize(size.width, size.height, requestedDpi)
+                        vd.setSurface(newReader.surface)
+                    } catch (t: Throwable) {
+                        newReader.close()
+                        throw t
+                    }
+                    val previous = captureReader
+                    captureReader = newReader
+                    virtualWidth = size.width
+                    virtualHeight = size.height
+                    previous?.close()
+                } else if (requestedDpi != virtualDpi) {
+                    (display ?: error("virtual display missing")).resize(size.width, size.height, requestedDpi)
+                }
+                virtualDpi = requestedDpi
+                margins = requestedMargins
+                marginColor = requestedColor
+                outputWidth = w
+                outputHeight = h
+                latestJpeg = null
+                sizeConfigured = true
+                successful = true
+                Log.i(TAG, "VD SIZE_READY revision=$revision virtual=${size.width}x${size.height} output=${w}x$h dpi=$virtualDpi margins=${margins.left},${margins.bottom} color=${marginColor.name}")
+            } catch (t: Throwable) {
+                Log.e(TAG, "VD resize failed; frame output held", t)
+            } finally {
+                completion.countDown()
+            }
+        }
+        if (!posted || !completion.await(5, TimeUnit.SECONDS) || !successful) return null
+        return SizeReady(revision, w, h)
     }
+
+    private data class SizeReady(val revision: Int, val width: Int, val height: Int)
 
     /** Move the foreground app onto the dash display and start encoding (phone just locked). */
     private fun promoteApp(component: String) {
@@ -595,11 +707,34 @@ object DashServer {
         capturing = false
         stopPanelOffRetries()
         stopHeartbeat()
-        wakeDisplay(0) // requestDisplayPower(ON) cannot restore a still-dozing power group by itself
-        setMainDisplayPower(true) // restore the phone's panel
         latestJpeg = null
-        lastComponent?.let { relocateApp(it, 0) } // move the task back to the phone's own display
-        Log.i(TAG, "demoted to phone")
+        val component = lastComponent
+        lastComponent = null
+        component?.let {
+            // Avoid relaunching an absent app during a power-button return.
+            if (runCatching { taskAndDisplayForPackage(it.substringBefore('/')) }.getOrNull() != null) {
+                relocateApp(it, 0)
+            } else {
+                Log.i(TAG, "demote: task absent; skip app launch")
+            }
+        }
+        // v40: system wake is required. Direct SurfaceFlinger panel ON can leave the
+        // power-group state and physical panel out of sync after pressing POWER.
+        wakePhoneViaKeyEvent()
+        // Trial: restore the physical panel after waking Android to avoid black-but-interactive state.
+        setMainDisplayPower(true)
+        Log.i(TAG, "demoted to phone; requested system wake and panel ON")
+    }
+
+    private fun wakePhoneViaKeyEvent() {
+        val rc = exec("input", "keyevent", "224") // KEYCODE_WAKEUP
+        if (rc == 0) {
+            Log.i(TAG, "wake: KEYCODE_WAKEUP injected")
+        } else {
+            Log.w(TAG, "wake: KEYCODE_WAKEUP failed rc=$rc; fallback to panel restore")
+            wakeDisplay(0)
+            setMainDisplayPower(true)
+        }
     }
 
     private fun toJpeg(image: Image): ByteArray {
@@ -617,14 +752,26 @@ object DashServer {
         } else {
             Bitmap.createBitmap(padded, 0, 0, virtualWidth, virtualHeight)
         }
-        val output = if (bitmap.width == outputWidth && bitmap.height == outputHeight) {
+        val usableWidth = outputWidth - margins.left
+        val usableHeight = outputHeight - margins.bottom
+        val scaled = if (bitmap.width == usableWidth && bitmap.height == usableHeight) {
             bitmap
         } else {
-            Bitmap.createScaledBitmap(bitmap, outputWidth, outputHeight, true)
+            Bitmap.createScaledBitmap(bitmap, usableWidth, usableHeight, true)
+        }
+        val output = if (margins.left == 0 && margins.bottom == 0) {
+            scaled
+        } else {
+            Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888).also { target ->
+                val canvas = Canvas(target)
+                canvas.drawColor(marginColor.argb)
+                canvas.drawBitmap(scaled, margins.left.toFloat(), 0f, null)
+            }
         }
         val out = ByteArrayOutputStream()
         output.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        if (output !== bitmap) output.recycle()
+        if (output !== scaled) output.recycle()
+        if (scaled !== bitmap) scaled.recycle()
         if (bitmap !== padded) bitmap.recycle()
         padded.recycle()
         return out.toByteArray()

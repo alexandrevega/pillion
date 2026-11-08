@@ -9,6 +9,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import app.pillion.android.AndroidDashAppCatalog
 import app.pillion.android.AndroidDashSetup
 import app.pillion.android.AndroidMirrorController
 import app.pillion.android.AndroidSettingsStore
@@ -21,6 +22,7 @@ import app.pillion.android.sdl.SdlService
 import app.pillion.core.AppInfo
 import app.pillion.core.MirrorController
 import app.pillion.core.MirrorSettings
+import app.pillion.core.CastMode
 import app.pillion.core.headunit.HeadUnitProfile
 import app.pillion.core.headunit.registerBuiltInHeadUnits
 import app.pillion.ui.App
@@ -54,7 +56,7 @@ class MainActivity : ComponentActivity() {
                 val intent = Intent(this, CaptureService::class.java)
                     .putExtra(CaptureService.EXTRA_QUALITY, pendingSettings.quality)
                     .putExtra(CaptureService.EXTRA_MAX_FPS, pendingSettings.maxFps)
-                    .putExtra(CaptureService.EXTRA_DASH_ENABLED, settingsStore.dashEnabled())
+                    .putExtra(CaptureService.EXTRA_DASH_ENABLED, false)
                     .putExtra(CaptureService.EXTRA_DASH_WIDTH, pendingSettings.dashResolution.width)
                     .putExtra(CaptureService.EXTRA_DASH_HEIGHT, pendingSettings.dashResolution.height)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
@@ -83,7 +85,7 @@ class MainActivity : ComponentActivity() {
             context = applicationContext,
             requestNotificationPermission = ::requestNotificationPermission,
         )
-        setContent { App(::controllerFor, updateChecker, settingsStore, dashSetup) }
+        setContent { App(::controllerFor, updateChecker, settingsStore, dashSetup, AndroidDashAppCatalog(applicationContext), onStartDash = ::startDash, onStopDash = ::stopMirroring, castMode = CaptureService.mode) }
     }
 
     /** Resolve the [MirrorController] for the selected head unit (DIP — the UI doesn't know which). */
@@ -101,6 +103,7 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun startMirroring(settings: MirrorSettings) {
+        if (CaptureService.mode.value != CastMode.NONE) return
         pendingSettings = settings
         val missing = requiredPermissions().filter {
             checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
@@ -111,6 +114,40 @@ class MainActivity : ComponentActivity() {
     private fun requestProjection() {
         val mpm = getSystemService(MediaProjectionManager::class.java)
         projectionLauncher.launch(mpm.createScreenCaptureIntent())
+    }
+
+    private val dashPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { granted ->
+        if (granted.values.all { it }) launchDashService(pendingSettings)
+    }
+
+    private fun startDash(settings: MirrorSettings) {
+        if (CaptureService.mode.value != CastMode.NONE) return
+        pendingSettings = settings
+        val missing = requiredPermissions().filter {
+            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) launchDashService(settings)
+        else dashPermissionLauncher.launch(missing.toTypedArray())
+    }
+
+    private fun launchDashService(settings: MirrorSettings) {
+        val packageName = settingsStore.dashAppPackage() ?: return
+        val component = packageManager.getLaunchIntentForPackage(packageName)?.component ?: return
+        val intent = Intent(this, CaptureService::class.java)
+            .putExtra(CaptureService.EXTRA_DASH_ENABLED, true)
+            .putExtra(CaptureService.EXTRA_DASH_COMPONENT, component.flattenToString())
+            .putExtra(CaptureService.EXTRA_DASH_DPI, settings.dashDpi)
+            .putExtra(CaptureService.EXTRA_MARGIN_LEFT, settings.dashMargins.left)
+            .putExtra(CaptureService.EXTRA_MARGIN_BOTTOM, settings.dashMargins.bottom)
+            .putExtra(CaptureService.EXTRA_MARGIN_COLOR, settings.dashMarginColor.name)
+            .putExtra(CaptureService.EXTRA_QUALITY, settings.quality)
+            .putExtra(CaptureService.EXTRA_MAX_FPS, settings.maxFps)
+            .putExtra(CaptureService.EXTRA_DASH_WIDTH, settings.dashResolution.width)
+            .putExtra(CaptureService.EXTRA_DASH_HEIGHT, settings.dashResolution.height)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+        else startService(intent)
     }
 
     private fun stopMirroring() {

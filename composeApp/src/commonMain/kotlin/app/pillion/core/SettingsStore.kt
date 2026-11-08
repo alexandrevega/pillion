@@ -16,6 +16,17 @@ interface SettingsStore {
     fun dashResolution(): DashResolution
     fun setDashResolution(resolution: DashResolution)
 
+    fun dashDpi(): Int = DashDpi.DEFAULT
+    fun setDashDpi(dpi: Int) {}
+    fun dashMargins(): DashMargins = DashMargins()
+    fun setDashMargins(margins: DashMargins) {}
+    fun dashMarginColor(): DashMarginColor = DashMarginColor.Black
+    fun setDashMarginColor(color: DashMarginColor) {}
+
+    /** Package selected for dedicated VD. Null means no choice yet. */
+    fun dashAppPackage(): String? = null
+    fun setDashAppPackage(packageName: String?) {}
+
     /** The head-unit the user picked at onboarding ([app.pillion.core.headunit.HeadUnitProfile.id]),
      *  or null if they haven't chosen yet (→ show the bike-selection screen). */
     fun selectedBikeId(): String?

@@ -11,4 +11,7 @@ data class MirrorSettings(
     val quality: Int = 40,
     val maxFps: Int = 15,
     val dashResolution: DashResolution = DashResolution.DEFAULT,
+    val dashDpi: Int = DashDpi.DEFAULT,
+    val dashMargins: DashMargins = DashMargins(),
+    val dashMarginColor: DashMarginColor = DashMarginColor.Black,
 )

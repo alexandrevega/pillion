@@ -7,6 +7,7 @@ import android.util.Log
 import app.pillion.core.ByteChannel
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.IOException
 import java.util.UUID
 
 /**
@@ -17,9 +18,13 @@ class RfcommByteChannel : ByteChannel {
     private var socket: BluetoothSocket? = null
     private var input: InputStream? = null
     private var output: OutputStream? = null
+    // close() must interrupt BluetoothSocket.connect() as well as established streams.
+    @Volatile private var connectingSocket: BluetoothSocket? = null
+    @Volatile private var cancelled = false
 
     @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT is requested by the Activity before start
     override fun open() {
+        cancelled = false // a new open() after the engine's retry cleanup is a fresh attempt
         val adapter = BluetoothAdapter.getDefaultAdapter() ?: error("no Bluetooth adapter")
         // A phone may be paired with several "CCU" dashes at once — a real bike (e.g. YCCU_<serial>)
         // AND a dev emulator (YCCU-dev / YCCU-test). Picking just the first match dialed the wrong one
@@ -34,19 +39,28 @@ class RfcommByteChannel : ByteChannel {
         runCatching { adapter.cancelDiscovery() }
         var lastError: Throwable? = null
         for (dash in candidates) {
+            if (cancelled) throw IOException("RFCOMM connection cancelled")
             Log.d("Pillion", "rfcomm: connecting to ${dash.name}")
+            var attemptSocket: BluetoothSocket? = null
             try {
                 val s = dash.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+                attemptSocket = s
+                connectingSocket = s
+                if (cancelled) throw IOException("RFCOMM connection cancelled")
                 s.connect()
+                if (cancelled) throw IOException("RFCOMM connection cancelled")
                 socket = s
                 input = s.inputStream
                 output = s.outputStream
+                connectingSocket = null
                 Log.d("Pillion", "rfcomm: connected to ${dash.name}")
                 return
             } catch (t: Throwable) {
                 lastError = t
                 Log.d("Pillion", "rfcomm: ${dash.name} unreachable (${t.message}); trying next")
-                runCatching { socket?.close() }
+                runCatching { attemptSocket?.close() }
+                connectingSocket = null
+                if (cancelled) throw IOException("RFCOMM connection cancelled", t)
             }
         }
         throw lastError ?: IllegalStateException("no CCU dash connectable")
@@ -62,7 +76,10 @@ class RfcommByteChannel : ByteChannel {
         (input ?: error("channel not open")).read(buffer)
 
     override fun close() {
+        cancelled = true
+        runCatching { connectingSocket?.close() }
         runCatching { socket?.close() }
+        connectingSocket = null
         socket = null; input = null; output = null
     }
 

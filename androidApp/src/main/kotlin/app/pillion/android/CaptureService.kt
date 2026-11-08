@@ -2,36 +2,38 @@ package app.pillion.android
 
 import android.app.Notification
 import android.app.NotificationChannel
-import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.app.Service
-import android.app.usage.UsageEvents
-import android.app.usage.UsageStatsManager
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
+import android.content.BroadcastReceiver
 import android.content.IntentFilter
-import android.content.pm.PackageManager
+import android.app.KeyguardManager
+import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import app.pillion.core.DashMargins
+import app.pillion.core.DashMarginColor
+import app.pillion.core.DashDpi
 import app.pillion.core.DashResolution
 import app.pillion.core.MirrorEngine
 import app.pillion.core.ScreenSource
 import app.pillion.core.MirrorState
+import app.pillion.core.CastMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.lang.reflect.Proxy
-import java.util.concurrent.Executor
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 
 /**
  * Foreground service that hosts a mirroring session. MediaProjection requires a running
@@ -44,137 +46,154 @@ class CaptureService : Service() {
     private var engine: MirrorEngine? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var dashEnabled = false
-    private var dashSwitch: SwitchableScreenSource? = null
+    private var dashSource: DashStreamScreenSource? = null
+    private var dashModeSource: DashModeScreenSource? = null
     private var screenReceiver: BroadcastReceiver? = null
-    private var keyguardManager: KeyguardManager? = null
-    private var keyguardListener: Any? = null
     @Volatile private var dashPromotedAtMs = 0L
     @Volatile private var dashSawLockedKeyguard = false
+    @Volatile private var promotionGeneration = 0L
+    private var dashTarget: String? = null
+    private var ownsSession = false
+    @Volatile private var stopping = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (engine != null || _mode.value != CastMode.NONE) {
+            // A Stop/Start race can create a second Service instance while the old one cleans up.
+            if (!ownsSession) stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        ownsSession = true
+        dashEnabled = intent?.getBooleanExtra(EXTRA_DASH_ENABLED, false) ?: false
+        _mode.value = if (dashEnabled) CastMode.DASH else CastMode.MIRROR
         acquireWakeLock()
         _state.value = MirrorState.Connecting
-
         val quality = intent?.getIntExtra(EXTRA_QUALITY, 40) ?: 40
-        val maxFps = intent?.getIntExtra(EXTRA_MAX_FPS, 15) ?: 15
-        val dashResolution = dashResolutionFrom(intent)
-        dashEnabled = intent?.getBooleanExtra(EXTRA_DASH_ENABLED, false) ?: false
-        startSession(quality, maxFps, dashResolution)
+        val fps = intent?.getIntExtra(EXTRA_MAX_FPS, 15) ?: 15
+        if (dashEnabled) startDashSession(quality, fps, dashResolutionFrom(intent), intent?.getStringExtra(EXTRA_DASH_COMPONENT), DashDpi.snap(intent?.getIntExtra(EXTRA_DASH_DPI, DashDpi.DEFAULT) ?: DashDpi.DEFAULT),
+            DashMargins.clamped(intent?.getIntExtra(EXTRA_MARGIN_LEFT, 0) ?: 0, intent?.getIntExtra(EXTRA_MARGIN_BOTTOM, 0) ?: 0),
+            DashMarginColor.fromName(intent?.getStringExtra(EXTRA_MARGIN_COLOR)))
+        else startMirrorSession(quality, fps)
         return START_NOT_STICKY
     }
 
-    /**
-     * One Bluetooth/NaviLite session. It always mirrors the phone via MediaProjection; when dash mode
-     * is enabled it also spawns the privileged helper and switches the engine's source to the dash
-     * (foreground app on a trusted display) whenever the phone is locked — **mirror while unlocked,
-     * dash while locked**. The helper only encodes while locked, so it costs no extra battery idle.
-     */
-    private fun startSession(quality: Int, maxFps: Int, dashResolution: DashResolution) {
-        // A screen-capture grant is single-use. If it's missing or stale (e.g. cleared when the app
-        // crashed + restarted), starting a mediaProjection foreground service throws SecurityException
-        // — which would HARD-CRASH the app. So validate first, and on a stale grant fall back to a
-        // non-projection foreground type + a clean "re-grant" message instead of crashing.
+    private fun startMirrorSession(quality: Int, fps: Int) {
         val data = resultData
         if (resultCode == 0 || data == null) {
-            runCatching { startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE) }
-            fail("Screen capture not granted — tap Start again"); return
+            fail("Screen capture not granted — tap Start again")
+            return
         }
-        // Must be foreground (mediaProjection) before acquiring the projection (Android 10+).
         try {
             startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } catch (e: SecurityException) {
-            Log.e(TAG, "media projection FGS rejected — stale capture grant", e)
             resultCode = 0; resultData = null
-            runCatching { startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE) }
-            fail("Screen capture expired — tap Start again"); return
+            fail("Screen capture expired — tap Start again")
+            return
         }
-        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val projection = mpm.getMediaProjection(resultCode, data) ?: run {
-            fail("screen capture denied"); return
+        val projection = try {
+            val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mpm.getMediaProjection(resultCode, data)
+        } catch (t: Throwable) {
+            Log.e(TAG, "MediaProjection failed", t)
+            null
+        } finally {
+            resultCode = 0; resultData = null
         }
-        // The grant is single-use; clear it so a later restart can't reuse a dead token (→ crash).
-        resultCode = 0; resultData = null
-        // Create the mirror display NOW, while the projection token is fresh.
-        val mirror = MediaProjectionScreenSource(this, projection, quality)
-        runCatching { mirror.start() }
-
-        val source: ScreenSource = if (dashEnabled) {
-            val switch = SwitchableScreenSource(mirror, DashStreamScreenSource())
-            dashSwitch = switch
-            // Spawn or reuse the helper. Starting it needs Wireless Debugging, but an already-running
-            // helper serves over loopback and survives Wi-Fi loss.
-            scope.launch(Dispatchers.IO) {
-                runCatching {
-                    DashHelper.ensureRunning(
-                        this@CaptureService,
-                        quality,
-                        dashResolution,
-                        preferExisting = true,
-                    )
-                }
-                    .onFailure {
-                        Log.e(TAG, "dash: helper unavailable", it)
-                        fail(it.message ?: "Dash helper unavailable")
-                    }
+        if (projection == null) {
+            fail("Screen capture denied")
+            return
+        }
+        runEngine(MediaProjectionScreenSource(this, projection, quality) {
+            // The capture token is single-use: a system revocation must end the
+            // mirror session, not leave RFCOMM connected awaiting frames forever.
+            if (!stopping && _mode.value == CastMode.MIRROR) {
+                // Do not wait for Service.onDestroy to release RFCOMM: interrupt an
+                // in-flight handshake or IMAGE_ACK as soon as Android revokes capture.
+                // A mere frame gap (with no onStop callback) does not reach this path.
+                engine?.stop()
+                stopSelf()
             }
-            registerScreenReceiver()
-            registerKeyguardUnlockListener()
-            // Self-heal: if the helper is killed (adbd restart on Wi-Fi/debug loss), respawn it over
-            // the loopback channel so the dash recovers instead of freezing.
-            DashHelper.startWatchdog(this, quality, dashResolution)
-            switch
-        } else {
-            mirror
-        }
-        runEngine(source, maxFps)
+        }, fps)
     }
 
-    /** Mirror while unlocked, dash while locked: promote the foreground app on lock, demote on unlock. */
-    private fun registerScreenReceiver() {
+    private fun startDashSession(quality: Int, fps: Int, resolution: DashResolution, component: String?, dpi: Int, margins: DashMargins, marginColor: DashMarginColor) {
+        if (component.isNullOrBlank()) {
+            fail("Select an app to display in Settings")
+            return
+        }
+        try {
+            startForegroundTyped(ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } catch (t: Throwable) {
+            fail("VD foreground service unavailable")
+            return
+        }
+        val source = DashStreamScreenSource(dpi, margins, marginColor)
+        dashSource = source
+        val modeSource = DashModeScreenSource(source)
+        dashModeSource = modeSource
+        dashTarget = component
+        registerDashScreenReceiver()
+        runEngine(modeSource, fps, retryInitialConnection = true)
+        scope.launch(Dispatchers.IO) {
+            runCatching { DashHelper.ensureRunning(this@CaptureService, quality, resolution, preferExisting = true) }
+                .onSuccess {
+                    if (!stopping && _mode.value == CastMode.DASH) {
+                        DashHelper.startWatchdog(this@CaptureService, quality, resolution)
+                        // If Start happens while already locked, no SCREEN_OFF edge will arrive.
+                        val power = getSystemService(PowerManager::class.java)
+                        if (power?.isInteractive == false && dashPromotedAtMs == 0L) promoteDash("already asleep at Start")
+                    }
+                }
+                .onFailure {
+                    if (!stopping) {
+                        Log.e(TAG, "VD helper failed", it)
+                        fail(it.message ?: "VD helper unavailable")
+                    }
+                }
+        }
+    }
+
+
+    /**
+     * v40's phone power/keyguard state machine.  A real POWER press during an
+     * active promotion must DEMOTE and wake the system, not power down the VD.
+     * The 2.5-second settle guard ignores synthetic screen edges from the helper.
+     */
+    private fun registerDashScreenReceiver() {
         val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context, intent: Intent) {
-                val action = intent.action
-                // onReceive runs on the main thread; promote/demote write to the helper socket, which
-                // is network I/O (NetworkOnMainThreadException otherwise), so do it off the main thread.
+            override fun onReceive(context: Context, intent: Intent) {
+                val action = intent.action ?: return
                 scope.launch(Dispatchers.IO) {
+                    if (stopping || _mode.value != CastMode.DASH) return@launch
                     when (action) {
                         Intent.ACTION_SCREEN_OFF -> {
-                            if (dashPromotedAtMs != 0L) {
-                                Log.d(TAG, "dash: screen off while already promoted; keeping dash active")
-                                return@launch
-                            }
-                            val component = foregroundComponent()
-                            Log.d(TAG, "dash: screen off; foreground=$component")
-                            if (component == null) {
-                                Log.w(TAG, "dash: no foreground app; usage access may be missing")
+                            val promoted = dashPromotedAtMs
+                            if (promoted == 0L) promoteDash("SCREEN_OFF")
+                            else if (System.currentTimeMillis() - promoted >= PROMOTE_GRACE_MS) {
+                                demoteDash("POWER during PROMOTE")
                             } else {
-                                dashSwitch?.promote(component)
-                                dashPromotedAtMs = System.currentTimeMillis()
-                                dashSawLockedKeyguard = isKeyguardLockedNow()
-                                scheduleLockStateSample(dashPromotedAtMs)
+                                Log.d(TAG, "dash: ignoring synthetic SCREEN_OFF during settle")
                             }
                         }
                         Intent.ACTION_SCREEN_ON -> {
-                            val promotedAt = dashPromotedAtMs
-                            if (promotedAt != 0L) {
-                                val ageMs = System.currentTimeMillis() - promotedAt
-                                if (ageMs >= RETURN_TO_PHONE_GRACE_MS) {
-                                    returnToPhone("screen on")
-                                } else {
-                                    // The helper briefly wakes the device during PROMOTE so the virtual display
-                                    // can render. Ignore that synthetic wake; panel-off retries will blank display 0.
-                                    Log.d(TAG, "dash: ignoring promotion wake (${ageMs}ms)")
-                                    schedulePromotionWakeSettleCheck(promotedAt, ageMs)
+                            val promoted = dashPromotedAtMs
+                            if (promoted != 0L) {
+                                val age = System.currentTimeMillis() - promoted
+                                if (age >= PROMOTE_GRACE_MS) demoteDash("SCREEN_ON")
+                                else {
+                                    // Wake generated by the promotion itself. Wait for lock
+                                    // state to settle before taking action.
+                                    val generation = promotionGeneration
+                                    delay(PROMOTE_GRACE_MS - age + 150L)
+                                    if (generation == promotionGeneration && dashPromotedAtMs != 0L &&
+                                        dashSawLockedKeyguard && !isKeyguardLockedNow()) demoteDash("unlock settled")
                                 }
                             }
                         }
-                        Intent.ACTION_USER_PRESENT -> {
-                            returnToPhone("user present", force = true)
-                        }
+                        Intent.ACTION_USER_PRESENT -> demoteDash("USER_PRESENT", force = true)
                     }
                 }
             }
@@ -184,156 +203,57 @@ class CaptureService : Service() {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU)
+            registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+        else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(receiver, filter)
         }
         screenReceiver = receiver
     }
 
-    /**
-     * Some devices do not send a useful SCREEN_ON transition after we blank display 0 directly.
-     * Keyguard unlock is the higher-signal event, but the listener is API 33+ and permission-gated,
-     * so it is registered defensively and the normal broadcasts remain as fallbacks.
-     */
-    private fun registerKeyguardUnlockListener() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        if (checkSelfPermission(PERMISSION_SUBSCRIBE_KEYGUARD) != PackageManager.PERMISSION_GRANTED) {
-            Log.d(TAG, "dash: keyguard unlock listener unavailable; permission not granted")
-            return
-        }
-        runCatching {
-            val manager = getSystemService(KeyguardManager::class.java)
-                ?: error("KeyguardManager unavailable")
-            val listenerClass = Class.forName("android.app.KeyguardManager\$KeyguardLockedStateListener")
-            val listener = Proxy.newProxyInstance(
-                listenerClass.classLoader,
-                arrayOf(listenerClass),
-            ) { _, method, args ->
-                if (method.name == "onKeyguardLockedStateChanged") {
-                    val locked = args?.firstOrNull() as? Boolean ?: return@newProxyInstance null
-                    scope.launch(Dispatchers.IO) {
-                        if (locked) {
-                            if (dashPromotedAtMs != 0L) dashSawLockedKeyguard = true
-                            Log.d(TAG, "dash: keyguard locked")
-                        } else {
-                            onKeyguardUnlocked()
-                        }
-                    }
-                }
-                null
-            }
-            val executor = Executor { runnable -> scope.launch(Dispatchers.IO) { runnable.run() } }
-            manager.javaClass
-                .getMethod("addKeyguardLockedStateListener", Executor::class.java, listenerClass)
-                .invoke(manager, executor, listener)
-            keyguardManager = manager
-            keyguardListener = listener
-            Log.d(TAG, "dash: keyguard unlock listener registered")
-        }.onFailure {
-            Log.d(TAG, "dash: keyguard unlock listener unavailable: ${it.javaClass.simpleName}")
-            keyguardManager = null
-            keyguardListener = null
-        }
-    }
-
-    private fun unregisterKeyguardUnlockListener() {
-        val manager = keyguardManager ?: return
-        val listener = keyguardListener ?: return
-        runCatching {
-            val listenerClass = Class.forName("android.app.KeyguardManager\$KeyguardLockedStateListener")
-            manager.javaClass
-                .getMethod("removeKeyguardLockedStateListener", listenerClass)
-                .invoke(manager, listener)
-        }
-        keyguardManager = null
-        keyguardListener = null
-    }
-
-    private fun onKeyguardUnlocked() {
-        val promotedAt = dashPromotedAtMs
-        if (promotedAt == 0L) return
-        val ageMs = System.currentTimeMillis() - promotedAt
-        if (dashSawLockedKeyguard || ageMs >= RETURN_TO_PHONE_GRACE_MS) {
-            returnToPhone("keyguard unlocked")
-        } else {
-            Log.d(TAG, "dash: ignoring keyguard-unlocked callback before lock settled (${ageMs}ms)")
-        }
-    }
-
-    private fun scheduleLockStateSample(promotedAt: Long) {
-        scope.launch(Dispatchers.IO) {
-            Thread.sleep(LOCK_STATE_SAMPLE_DELAY_MS)
-            if (dashPromotedAtMs == promotedAt && isKeyguardLockedNow()) {
-                dashSawLockedKeyguard = true
-                Log.d(TAG, "dash: keyguard locked after promotion")
-            }
-        }
-    }
-
-    private fun schedulePromotionWakeSettleCheck(promotedAt: Long, ageMs: Long) {
-        val delayMs = (RETURN_TO_PHONE_GRACE_MS - ageMs).coerceAtLeast(0L) + 150L
-        scope.launch(Dispatchers.IO) {
-            Thread.sleep(delayMs)
-            if (dashPromotedAtMs != promotedAt) return@launch
-            if (dashSawLockedKeyguard && isKeyguardUnlockedNow()) {
-                returnToPhone("unlock after promotion wake")
-            } else {
-                Log.d(TAG, "dash: promotion wake settled; keeping dash active")
-            }
-        }
-    }
-
-    private fun returnToPhone(reason: String, force: Boolean = false) {
-        if (!force && dashPromotedAtMs == 0L) return
-        Log.d(TAG, "dash: $reason; returning to phone")
-        dashPromotedAtMs = 0L
-        dashSawLockedKeyguard = false
-        dashSwitch?.demote()
-    }
-
     private fun isKeyguardLockedNow(): Boolean {
         val manager = getSystemService(KeyguardManager::class.java) ?: return false
-        return manager.isDeviceLocked || manager.isKeyguardLocked
+        return manager.isKeyguardLocked || manager.isDeviceLocked
     }
 
-    private fun isKeyguardUnlockedNow(): Boolean {
-        val manager = getSystemService(KeyguardManager::class.java) ?: return false
-        return !manager.isDeviceLocked && !manager.isKeyguardLocked
-    }
-
-    /** The foreground app's launcher component to promote at lock (excludes Pillion). */
-    private fun foregroundComponent(): String? {
-        val usm = getSystemService(UsageStatsManager::class.java) ?: return null
-        val now = System.currentTimeMillis()
-        val events = runCatching { usm.queryEvents(now - 60_000, now) }
-            .onFailure { Log.w(TAG, "dash: usage query failed", it) }
-            .getOrNull() ?: return null
-        val event = UsageEvents.Event()
-        var component: String? = null
-        while (events.hasNextEvent()) {
-            events.getNextEvent(event)
-            @Suppress("DEPRECATION")
-            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND && event.packageName != packageName) {
-                val candidate = packageManager.getLaunchIntentForPackage(event.packageName)
-                    ?.component
-                    ?.flattenToString()
-                if (candidate == null) {
-                    Log.d(TAG, "dash: ignoring foreground package without launcher: ${event.packageName}")
-                } else {
-                    component = candidate
-                    Log.d(TAG, "dash: foreground candidate=$component")
-                }
-            }
+    @Synchronized
+    private fun promoteDash(reason: String) {
+        if (stopping || dashPromotedAtMs != 0L || _mode.value != CastMode.DASH) return
+        val component = dashTarget ?: return
+        val at = System.currentTimeMillis()
+        dashPromotedAtMs = at
+        val generation = ++promotionGeneration
+        dashSawLockedKeyguard = isKeyguardLockedNow()
+        dashModeSource?.promote(component)
+        scope.launch(Dispatchers.IO) {
+            delay(250L)
+            if (generation == promotionGeneration && isKeyguardLockedNow()) dashSawLockedKeyguard = true
         }
-        if (component == null) Log.w(TAG, "dash: UsageStats returned no launchable foreground app")
-        return component
+        scope.launch(Dispatchers.IO) {
+            delay(PROMOTE_GRACE_MS + 150L)
+            if (generation != promotionGeneration || stopping) return@launch
+            val interactive = getSystemService(PowerManager::class.java)?.isInteractive
+            if (interactive == false) demoteDash("post-promote sleep recovery")
+        }
     }
 
-    private fun runEngine(screen: ScreenSource, maxFps: Int) {
-        val mirror = MirrorEngine(RfcommByteChannel(), screen, maxFps)
+    @Synchronized
+    private fun demoteDash(reason: String, force: Boolean = false) {
+        if (stopping || (!force && dashPromotedAtMs == 0L)) return
+        dashPromotedAtMs = 0L
+        promotionGeneration++
+        dashSawLockedKeyguard = false
+        dashModeSource?.demote()
+    }
+
+
+    private fun runEngine(
+        screen: ScreenSource,
+        maxFps: Int,
+        retryInitialConnection: Boolean = false,
+    ) {
+        val mirror = MirrorEngine(RfcommByteChannel(), screen, maxFps, retryInitialConnection = retryInitialConnection)
         engine = mirror
         scope.launch {
             mirror.state.collect { state ->
@@ -362,26 +282,49 @@ class CaptureService : Service() {
     }
 
     private fun fail(message: String) {
+        if (stopping) return
         _state.value = MirrorState.Error(message)
         stopSelf()
     }
 
     override fun onDestroy() {
-        engine?.stop()
-        DashHelper.stopWatchdog() // stop first, so it doesn't respawn the helper we're tearing down
+        if (!ownsSession) {
+            // ACTION_STOP or a rejected Start may create a short-lived Service instance.
+            // It must not unlock the previous session's still-running cleanup.
+            scope.cancel()
+            super.onDestroy()
+            return
+        }
+        stopping = true
         screenReceiver?.let { runCatching { unregisterReceiver(it) } }
-        unregisterKeyguardUnlockListener()
-        // The helper is detached (orphaned to init), so it won't die on its own. Tell it to QUIT over
-        // loopback — works with no network — to release the trusted display; pkill over ADB is a
-        // best-effort backup (only reachable while wifi is up). Detached thread: must outlive cancel().
-        val switch = dashSwitch
-        if (dashEnabled) Thread {
-            runCatching { switch?.quit() }
-            killHelper()
-        }.start()
+        screenReceiver = null
+        dashPromotedAtMs = 0L
+        promotionGeneration++
+        engine?.stop()
+        DashHelper.stopWatchdog()
         scope.cancel()
         releaseWakeLock()
-        _state.value = MirrorState.Idle
+        val source = dashSource
+        Thread({
+            try {
+                // First stop the image source, then let the original connect/Helper tasks finish.
+                runCatching { source?.quit() }
+                runBlocking { scope.coroutineContext[Job]?.join() }
+                if (source != null) {
+                    // ensureRunning() uses this same monitor. Never kill a newly spawned helper
+                    // before the old startup operation has completed.
+                    synchronized(DashHelper) {
+                        killHelper()
+                        if (!DashHelper.waitUntilStopped()) {
+                            Log.w(TAG, "dash: helper exit timeout; releasing session lock")
+                        }
+                    }
+                }
+            } finally {
+                _state.value = MirrorState.Idle
+                _mode.value = CastMode.NONE
+            }
+        }, "pillion-session-cleanup").start()
         super.onDestroy()
     }
 
@@ -439,19 +382,21 @@ class CaptureService : Service() {
     }
 
     companion object {
+        private const val PROMOTE_GRACE_MS = 2500L
         private const val NOTIF_ID = 1
         private const val CHANNEL_ID = "pillion"
         private const val TAG = "Pillion"
         private const val MAX_SESSION_MS = 3L * 60 * 60 * 1000 // 3h safety cap
-        private const val RETURN_TO_PHONE_GRACE_MS = 3_000L
-        private const val LOCK_STATE_SAMPLE_DELAY_MS = 250L
-        private const val PERMISSION_SUBSCRIBE_KEYGUARD =
-            "android.permission.SUBSCRIBE_TO_KEYGUARD_LOCKED_STATE"
         const val ACTION_STOP = "app.pillion.action.STOP"
         const val EXTRA_QUALITY = "quality"
         const val EXTRA_MAX_FPS = "maxFps"
         /** When true, the session switches to the dedicated dash display whenever the phone is locked. */
         const val EXTRA_DASH_ENABLED = "dashEnabled"
+        const val EXTRA_DASH_COMPONENT = "dashComponent"
+        const val EXTRA_DASH_DPI = "dashDpi"
+        const val EXTRA_MARGIN_LEFT = "marginLeft"
+        const val EXTRA_MARGIN_BOTTOM = "marginBottom"
+        const val EXTRA_MARGIN_COLOR = "marginColor"
         const val EXTRA_DASH_WIDTH = "dashWidth"
         const val EXTRA_DASH_HEIGHT = "dashHeight"
 
@@ -461,5 +406,7 @@ class CaptureService : Service() {
 
         private val _state = MutableStateFlow<MirrorState>(MirrorState.Idle)
         val state: StateFlow<MirrorState> = _state.asStateFlow()
+        private val _mode = MutableStateFlow(CastMode.NONE)
+        val mode: StateFlow<CastMode> = _mode.asStateFlow()
     }
 }

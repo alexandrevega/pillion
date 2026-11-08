@@ -13,3 +13,6 @@ sealed interface MirrorState {
     data object Broadcasting : MirrorState
     data class Error(val message: String) : MirrorState
 }
+
+/** Owner of the Android NaviLite casting session. */
+enum class CastMode { NONE, MIRROR, DASH }

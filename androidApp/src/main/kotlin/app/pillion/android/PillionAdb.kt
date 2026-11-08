@@ -41,9 +41,14 @@ class PillionAdb private constructor(
     private val certificate: X509Certificate,
 ) : AbsAdbConnectionManager() {
 
+    @Volatile private var connectedViaLoopback = false
+
     init {
         setApi(Build.VERSION.SDK_INT)
     }
+
+    /** True only if this manager established its live ADB connection via tcpip loopback. */
+    fun isLoopbackConnected(): Boolean = connectedViaLoopback && isConnected()
 
     override fun getPrivateKey(): PrivateKey = privateKey
     override fun getCertificate(): Certificate = certificate
@@ -55,11 +60,18 @@ class PillionAdb private constructor(
     }
 
     /** Connect using the host + port shown on the main Wireless debugging screen. */
-    fun connectDevice(host: String, port: Int): Boolean = connect(host, port)
+    fun connectDevice(host: String, port: Int): Boolean {
+        val connected = connect(host, port)
+        if (connected) connectedViaLoopback = host == LOOPBACK_HOST && port == TCPIP_PORT
+        return connected
+    }
 
     /** Discover the adbd endpoint via mDNS and connect (used for reconnect after a reboot). */
-    fun autoConnectDevice(context: Context, timeoutMs: Long = 10_000): Boolean =
-        autoConnect(context, timeoutMs)
+    fun autoConnectDevice(context: Context, timeoutMs: Long = 10_000): Boolean {
+        val connected = autoConnect(context, timeoutMs)
+        if (connected) connectedViaLoopback = false
+        return connected
+    }
 
     /** Run a one-shot shell command and return its combined stdout/stderr. */
     fun runShell(command: String): String {
@@ -108,6 +120,7 @@ class PillionAdb private constructor(
      * dash a channel it can use to **respawn the helper offline** if it ever gets killed.
      */
     fun enableTcpip(port: Int = TCPIP_PORT) {
+        connectedViaLoopback = false
         // adbd restarts the instant it handles "tcpip:", frequently WITHOUT acking the stream open —
         // so openStream()/readBytes() on this (about-to-die) connection can block forever. We only
         // need the side effect (adbd now listens on :port), not the ack, so run it on a worker and
