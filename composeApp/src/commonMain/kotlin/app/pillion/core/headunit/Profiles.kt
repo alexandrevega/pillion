@@ -9,7 +9,7 @@ package app.pillion.core.headunit
 /** Yamaha NaviLite — Bluetooth slideshow (Path A, the original Pillion path). */
 object NaviLiteProfile : HeadUnitProfile {
     override val id = "yamaha-navilite"
-    override val displayName = "StreetCross-compatible (Bluetooth)"
+    override val displayName = "StreetCross-compatible"
     override val vendor = "Yamaha"
     override val linkKind = LinkKind.BluetoothRfcomm   // iOS resolves this to MFi in its SessionFactory
     override val requiresUsb = false
@@ -22,7 +22,7 @@ object NaviLiteProfile : HeadUnitProfile {
 /** Yamaha SDL / Motorize-compatible — USB full-motion H.264 (Path B). Proven on a real Tracer. */
 object SdlProfile : HeadUnitProfile {
     override val id = "yamaha-sdl"
-    override val displayName = "Motorize-compatible (USB)"
+    override val displayName = "Motorize-compatible"
     override val vendor = "Yamaha"
     override val linkKind = LinkKind.UsbAoa            // iOS resolves this to iAP2/EAP in its SessionFactory
     override val requiresUsb = true

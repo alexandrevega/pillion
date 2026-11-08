@@ -1,5 +1,6 @@
 package app.pillion.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -38,6 +39,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.pillion.resources.Res
+import app.pillion.resources.app_icon
+import org.jetbrains.compose.resources.painterResource
 import app.pillion.core.MirrorState
 import app.pillion.core.CastMode
 import app.pillion.core.UpdateInfo
@@ -131,6 +135,12 @@ private fun UpdateReminder(version: String, onClick: () -> Unit) {
 @Composable
 private fun Wordmark(bikeName: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Image(
+            painter = painterResource(Res.drawable.app_icon),
+            contentDescription = "Pillion",
+            modifier = Modifier.size(56.dp).clip(RoundedCornerShape(14.dp)),
+        )
+        Spacer(Modifier.height(8.dp))
         Text(
             "Pillion",
             style = MaterialTheme.typography.headlineMedium,

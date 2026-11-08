@@ -145,7 +145,11 @@ fun App(
         } else {
             HomeScreen(
                 state = if (dashStartError != null && activeMode == CastMode.NONE) app.pillion.core.MirrorState.Error(dashStartError!!) else state,
-                bikeName = if (wifiEnabled && profile.requiresUsb) "${profile.displayName} · via Wi-Fi" else profile.displayName,
+                bikeName = profile.displayName + when {
+                    !profile.requiresUsb -> " · Bluetooth"
+                    wifiEnabled -> " · Wi-Fi"
+                    else -> " · USB"
+                },
                 update = update,
                 onOpenSettings = { showSettings = true },
                 onStart = {
