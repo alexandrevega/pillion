@@ -7,14 +7,15 @@
 <p align="center">
   <img src="https://img.shields.io/badge/status-alpha-orange" alt="alpha">
   <img src="https://img.shields.io/badge/platform-Android-3DDC84" alt="Android">
-  <img src="https://img.shields.io/badge/iOS-planned-lightgrey" alt="iOS planned">
+  <img src="https://img.shields.io/badge/iOS-experimental-A2AAAD?logo=apple&logoColor=white" alt="iOS experimental">
   <img src="https://img.shields.io/badge/license-PolyForm%20NC-blue" alt="PolyForm Noncommercial">
   <a href="https://discord.gg/mxNV97QUnB"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white" alt="Join the Discord"></a>
   <a href="https://buymeacoffee.com/alexandrevega"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy me a coffee"></a>
 </p>
 
-> **🚧 Alpha.** Android-only for now and under active development — it works on my MT-07 (2025) but is
-> rough, and the protocol/UI may still change. **iOS support is planned.** Expect bugs, and please
+> **🚧 Alpha.** Under active development — it works on my MT-07 (2025) but is rough, and the
+> protocol/UI may still change. **iOS is experimental** — it runs via sideload (AltStore/SideStore);
+> see [docs/IOS-SIDELOAD.md](docs/IOS-SIDELOAD.md). Expect bugs, and please
 > [report them](../../issues) (especially compatibility on other bikes).
 
 **Cast your phone's screen to a Yamaha motorcycle TFT dash over Bluetooth** — so you can run
@@ -94,8 +95,9 @@ cd pillion
 ```
 
 Or open the project in Android Studio and Run. The shared protocol/engine lives in
-`composeApp/src/commonMain` (ready for an iOS target later); Android specifics are in
-`composeApp/src/androidMain`.
+`composeApp/src/commonMain` (also driving the iOS app in `composeApp/src/iosMain` + `iosApp/`);
+Android specifics are in `composeApp/src/androidMain`. For the iOS build see
+[docs/IOS-SIDELOAD.md](docs/IOS-SIDELOAD.md).
 
 ## License
 
