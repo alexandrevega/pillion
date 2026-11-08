@@ -37,3 +37,18 @@ vendor/
 *.jks
 *.keystore
 keystore.properties
+
+# --- Local test/emulator scratch (NEVER commit) ---
+ccu/
+tools/jdk*/
+dist/
+*.idsig
+*.log
+*.h264
+*.ext4
+*_evidence/
+regress/evidence/
+gal/
+aoa/
+__pycache__/
+build_*.log

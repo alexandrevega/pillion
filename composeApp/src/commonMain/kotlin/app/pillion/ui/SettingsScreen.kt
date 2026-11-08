@@ -274,6 +274,8 @@ internal fun SettingsScreen(
             LinkRow("Report an issue") { uriHandler.openUri("$REPO_URL/issues") }
             GroupDivider()
             LinkRow("Changelog") { uriHandler.openUri("$REPO_URL/blob/main/CHANGELOG.md") }
+            GroupDivider()
+            LinkRow("Third-party notices") { uriHandler.openUri("$REPO_URL/blob/main/THIRD-PARTY-NOTICES.md") }
         }
 
         Spacer(Modifier.height(28.dp))
