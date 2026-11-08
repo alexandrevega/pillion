@@ -1,0 +1,67 @@
+name: Android
+
+# Build + test the Android app. Lint is intentionally not a gate (currently red:
+# see #23). iOS is not built here (needs signing/macOS); add later if wanted.
+on:
+  push:
+    branches: [main, "release/**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # the release job attaches the APK to a GitHub Release on v* tags
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK + run host tests
+        run: ./gradlew :androidApp:assembleDebug :composeApp:testAndroidHostTest --stacktrace --no-daemon
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pillion-debug-apk
+          path: androidApp/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: "**/build/reports/tests/**"
+          if-no-files-found: ignore
+
+  release:
+    # Runs only when a v* tag is pushed, so an alpha is cut deliberately, never on every commit.
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pillion-debug-apk
+          path: apk
+      - name: Create GitHub pre-release with the APK
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: apk/*.apk
+          generate_release_notes: true
