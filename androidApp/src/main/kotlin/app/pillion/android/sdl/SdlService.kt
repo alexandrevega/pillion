@@ -61,6 +61,7 @@ class SdlService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        BikeInputBridge.init(applicationContext)
         startInForeground(false)
     }
 
@@ -245,6 +246,9 @@ class SdlService : Service() {
             override fun onNotified(notification: RPCNotification) {
                 val bp = notification as OnButtonPress
                 Logger.d("sdl BIKE BUTTON: ${bp.buttonName} (${bp.buttonPressMode})")
+                // Mirror path actuation: synthesize the key locally over the in-app ADB channel when
+                // one is alive; log-only fallback otherwise (see BikeInputBridge).
+                BikeInputBridge.dispatchBikeButton(bp.buttonName?.toString(), bp.buttonPressMode?.toString())
             }
         }
         builder.setRPCNotificationListeners(notifs)
