@@ -12,6 +12,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 CONFIG="${1:-Release}"
 DD="build/ipa"
 
+# CI / fresh clone: project.yml references the gitignored Signing.xcconfig, which xcodegen requires to
+# exist. The IPA is built unsigned (CODE_SIGNING_ALLOWED=NO) then ad-hoc signed, so a no-signing stub is
+# fine; a developer's real Signing.xcconfig (with their team) is kept when present.
+[ -f Signing.xcconfig ] || printf 'CODE_SIGN_STYLE = Manual\nCODE_SIGNING_ALLOWED = NO\nDEVELOPMENT_TEAM =\n' > Signing.xcconfig
+
 xcodegen generate >/dev/null
 rm -rf "$DD" Payload Pillion.ipa
 
