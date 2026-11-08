@@ -1,7 +1,8 @@
 name: Android
 
-# Build + test the Android app. Lint is intentionally not a gate (currently red:
-# see #23). iOS is not built here (needs signing/macOS); add later if wanted.
+# Build + test Android (ubuntu-arm) and compile the shared Kotlin for iOS (macOS).
+# Lint is intentionally not a gate (currently red: see #23). Public repo, so all
+# runners are free — ARM is chosen for speed, not cost.
 on:
   push:
     branches: [main, "release/**"]
@@ -15,7 +16,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -70,7 +71,7 @@ jobs:
     # Runs only when a v* tag is pushed, so an alpha is cut deliberately, never on every commit.
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/download-artifact@v4
         with:
