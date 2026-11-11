@@ -147,6 +147,20 @@ object DashServer {
 
         try {
             val context = ShellContext(systemContext())
+            // On a fast Start -> POWER, Android may be fully asleep while this
+            // helper starts. Wake before creating the trusted virtual display.
+            val power = context.getSystemService(android.os.PowerManager::class.java)
+            if (power?.isInteractive == false) {
+                val rc = runCatching { exec("input", "keyevent", "224") } // KEYCODE_WAKEUP
+                    .onFailure { Log.w(TAG, "VD startup WAKE failed", it) }.getOrNull()
+                if (rc == 0) {
+                    for (attempt in 0 until 20) {
+                        if (power.isInteractive) break
+                        Thread.sleep(100L)
+                    }
+                }
+                Log.i(TAG, "VD startup WAKE before create rc=$rc interactive=${power.isInteractive}")
+            }
             val captureThread = HandlerThread("pillion-capture").apply { start() }
             val handler = Handler(captureThread.looper)
             captureHandler = handler
