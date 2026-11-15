@@ -23,6 +23,7 @@ import app.pillion.core.DashFrameGate
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import android.util.Log
 import android.view.Surface
 import java.io.BufferedOutputStream
@@ -100,6 +101,10 @@ object DashServer {
     private var display: VirtualDisplay? = null
     private var captureReader: ImageReader? = null
     private var captureHandler: Handler? = null
+    // A real buffer from the startup reader is the readiness gate for the first Surface swap.
+    // Its callback runs on the capture handler, so SIZE must wait on another thread.
+    private val initialReaderFrame = CountDownLatch(1)
+    private const val INITIAL_FRAME_WAIT_WARNING_MS = 5000L
     @Volatile private var sizeConfigured = false
     // Read on the capture/encode thread, written from the control channel (SIZE) — must be volatile.
     @Volatile private var outputWidth = 480
@@ -190,6 +195,7 @@ object DashServer {
     private fun onImage(reader: ImageReader) {
         if (reader !== captureReader) return
         val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return
+        if (initialReaderFrame.count > 0L) initialReaderFrame.countDown()
         try {
             if (!capturing || !sizeConfigured) return
             val now = System.currentTimeMillis()
@@ -291,6 +297,28 @@ object DashServer {
     }
 
     private fun readCommands(client: Socket, input: BufferedReader, out: DataOutputStream, writeLock: Any, sizeReadyForClient: AtomicBoolean) {
+        val clientAlive = AtomicBoolean(true)
+        val sizeEpoch = AtomicInteger(0)
+        val sizeApplyLock = Any()
+
+        // Handle SIZE off the TCP command reader when initial capture is not yet proven.
+        // The reader must remain available for a PROMOTE that starts drawing on the VD.
+        fun applySize(raw: String, epoch: Int) {
+            synchronized(sizeApplyLock) {
+                if (!clientAlive.get() || epoch != sizeEpoch.get()) return
+                val ready = resizeOutput(raw) ?: return
+                if (!clientAlive.get() || epoch != sizeEpoch.get()) return
+                synchronized(writeLock) {
+                    out.writeInt(DashFrameGate.SIZE_READY_MARKER)
+                    out.writeInt(ready.revision)
+                    out.writeInt(ready.width)
+                    out.writeInt(ready.height)
+                    out.flush()
+                    sizeReadyForClient.set(true)
+                }
+            }
+        }
+
         try {
             while (true) {
                 val line = input.readLine()?.trim() ?: break
@@ -298,19 +326,31 @@ object DashServer {
                     line.startsWith("PROMOTE ") -> promoteApp(line.removePrefix("PROMOTE ").trim())
                     line == "DEMOTE" -> demoteApp()
                     line.startsWith("SIZE ") -> {
+                        val raw = line.removePrefix("SIZE ").trim()
+                        val epoch = sizeEpoch.incrementAndGet()
                         sizeReadyForClient.set(false)
-                        val ready = resizeOutput(line.removePrefix("SIZE ").trim())
-                        if (ready != null) {
-                            synchronized(writeLock) {
-                                out.writeInt(DashFrameGate.SIZE_READY_MARKER)
-                                out.writeInt(ready.revision)
-                                out.writeInt(ready.width)
-                                out.writeInt(ready.height)
-                                out.flush()
-                                // Let the writer replay the helper's cached JPEG if unchanged,
-                                // or wait for a new frame if the VD was rebuilt.
-                                sizeReadyForClient.set(true)
-                            }
+                        if (!sizeConfigured && initialReaderFrame.count > 0L &&
+                            initialSizeNeedsSurfaceReplacement(raw)) {
+                            Thread {
+                                val started = System.currentTimeMillis()
+                                var timeoutLogged = false
+                                while (clientAlive.get() && sizeEpoch.get() == epoch) {
+                                    if (initialReaderFrame.await(250L, TimeUnit.MILLISECONDS)) break
+                                    if (!timeoutLogged &&
+                                        System.currentTimeMillis() - started >= INITIAL_FRAME_WAIT_WARNING_MS) {
+                                        timeoutLogged = true
+                                        Log.w(TAG, "VD FRAME-GATE: initial image stalled for " +
+                                            "${INITIAL_FRAME_WAIT_WARNING_MS}ms; SIZE pending, " +
+                                            "Surface swap withheld (capturing=$capturing)")
+                                    }
+                                }
+                                if (clientAlive.get() && sizeEpoch.get() == epoch &&
+                                    initialReaderFrame.count == 0L) {
+                                    applySize(raw, epoch)
+                                }
+                            }.apply { isDaemon = true; name = "dash-first-frame-gate"; start() }
+                        } else {
+                            applySize(raw, epoch)
                         }
                     }
                     line == "QUIT" -> shutdown()
@@ -319,6 +359,7 @@ object DashServer {
         } catch (_: Throwable) {
             // fall through to close
         } finally {
+            clientAlive.set(false)
             // Closing wakes the writer loop (it checks isClosed) so a broken client's thread ends
             // instead of sleeping forever.
             runCatching { client.close() }
@@ -329,6 +370,21 @@ object DashServer {
      * Apply CCU geometry to the existing VD and ImageReader. The task stays on the
      * same displayId. Reply SIZE_READY only after capture-thread reconfiguration ends.
      */
+    /** True only when this SIZE would replace the startup reader's Surface. */
+    private fun initialSizeNeedsSurfaceReplacement(arg: String): Boolean {
+        val parts = arg.split(' ')
+        val w = parts.getOrNull(0)?.toIntOrNull() ?: return false
+        val h = parts.getOrNull(1)?.toIntOrNull() ?: return false
+        val left = parts.getOrNull(4)?.toIntOrNull() ?: 0
+        val bottom = parts.getOrNull(5)?.toIntOrNull() ?: 0
+        return runCatching {
+            val size = DashCaptureGeometry.forMargins(
+                preferredVirtualWidth, w, h, DashMargins.clamped(left, bottom),
+            )
+            size.width != virtualWidth || size.height != virtualHeight
+        }.getOrDefault(false)
+    }
+
     private fun resizeOutput(arg: String): SizeReady? {
         val parts = arg.split(' ')
         val w = parts.getOrNull(0)?.toIntOrNull() ?: return null
