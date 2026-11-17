@@ -3,6 +3,7 @@ package app.pillion.android.sdl
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -15,6 +16,11 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import app.pillion.android.AndroidSettingsStore
+import app.pillion.android.DashHelper
+import app.pillion.android.DashLockSwitcher
+import app.pillion.android.DashStreamScreenSource
+import app.pillion.android.PillionAdb
 import app.pillion.core.Logger
 import app.pillion.core.MirrorState
 import com.smartdevicelink.managers.SdlManager
@@ -39,6 +45,11 @@ import com.smartdevicelink.transport.MultiplexTransportConfig
 import com.smartdevicelink.transport.TCPTransportConfig
 import com.smartdevicelink.transport.enums.TransportType
 import com.smartdevicelink.util.SystemInfo
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.util.Vector
 
 /**
@@ -58,6 +69,10 @@ class SdlService : Service() {
     private var stopping = false // user-initiated stop in progress — resolve async callbacks to Idle, not reconnect
     private var videoCapability: VideoStreamingCapability? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var dashFeed: SdlDashFeed? = null
+    private var dashLock: DashLockSwitcher? = null
+    @Volatile private var projectionLost = false // capture ended while the dash covered the video
 
     override fun onCreate() {
         super.onCreate()
@@ -74,6 +89,7 @@ class SdlService : Service() {
             Logger.d("sdl: user stopped — disabling auto-restart until next Start")
             stopping = true // so the async projection-stop callback resolves to Idle, not Connecting
             setUserStopped(this, true)
+            stopDash()
             sdlManager?.dispose()
             sdlManager = null
             SdlSessionState.state.value = MirrorState.Idle
@@ -115,6 +131,9 @@ class SdlService : Service() {
         if (sdlManager == null) {
             currentKey = key
             buildAndStart(appId, tcpHost, tcpPort)
+        } else if (mirrorMode && projectionLost) {
+            // New capture grant while the app was held on the dash after unlock: back to mirroring.
+            resumeMirrorAfterLoss()
         } else if (mirrorMode) {
             // Capture granted on an already-registered session — stream now if the dash has activated us.
             maybeStartVideo()
@@ -144,7 +163,7 @@ class SdlService : Service() {
         }
     }
 
-    private fun startInForeground(mirror: Boolean) {
+    private fun startInForeground(mirror: Boolean, heldOnDash: Boolean = false) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = getSystemService(NotificationManager::class.java)
         if (nm.getNotificationChannel(CHANNEL_ID) == null) {
@@ -152,10 +171,17 @@ class SdlService : Service() {
                 NotificationChannel(CHANNEL_ID, "Pillion SDL", NotificationManager.IMPORTANCE_LOW),
             )
         }
-        val n = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("Pillion — connecting to dash")
+        val builder = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle(if (heldOnDash) "Pillion — app kept on the bike dash" else "Pillion — connecting to dash")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .build()
+        if (heldOnDash) {
+            // Android ends screen capture at lock; only a fresh grant (Start mirroring) mirrors the phone again.
+            builder.setContentText("Tap, then Start mirroring, to show the phone screen again")
+            packageManager.getLaunchIntentForPackage(packageName)?.let {
+                builder.setContentIntent(PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE))
+            }
+        }
+        val n = builder.build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             // Pass the EXACT type — the no-arg startForeground validates ALL manifest types, and
             // mediaProjection without a projection grant throws (that was the crash).
@@ -323,6 +349,7 @@ class SdlService : Service() {
                 if (success) {
                     val displayClass: Class<out SdlRemoteDisplay> = ScreenMirrorDisplay::class.java
                     vsm.startRemoteDisplayStream(applicationContext, displayClass, params, false)
+                    startDash(params)
                     SdlSessionState.state.value = MirrorState.Broadcasting
                     Logger.d("sdl: screen-mirror stream requested — look at the dash")
                 } else {
@@ -356,7 +383,39 @@ class SdlService : Service() {
      * hanging the bike. The SDL session itself stays registered.
      */
     private fun handleProjectionStopped() {
+        val feed = dashFeed
+        if (!stopping && feed != null && (feed.active || !isScreenInteractive())) {
+            // Locked with the dash covering (or about to cover) the video: keep streaming it. Android 14+
+            // ends capture as the screen locks, before the SCREEN_OFF promotion lands, so give that
+            // promotion a moment. The dead capture only matters once the phone is unlocked (onDashDemoted).
+            Logger.d("sdl mirror: projection stopped while locked — dedicated dash keeps the video")
+            projectionLost = true
+            ProjectionHolder.projection = null
+            // Drop the mediaProjection FGS type with the dead grant, as the stop path does. After unlock the
+            // app stays on the dash (see DashLockSwitcher.holdOnDash); the notification offers the way back.
+            runCatching { startInForeground(false, heldOnDash = true) }.onFailure { Logger.e("sdl: FGS downgrade err", it) }
+            // Not "Broadcasting": the home button must offer Start (a new grant), not Stop.
+            SdlSessionState.state.value = MirrorState.Error(HELD_ON_DASH_MESSAGE)
+            if (!feed.active) {
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (projectionLost && dashFeed === feed && !feed.active) {
+                        Logger.d("sdl dash: nothing promoted after lock — stopping video")
+                        projectionLost = false
+                        stopMirrorVideo()
+                    }
+                }, PROMOTION_WAIT_MS)
+            }
+            return
+        }
+        stopMirrorVideo()
+    }
+
+    private fun isScreenInteractive(): Boolean =
+        (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+
+    private fun stopMirrorVideo() {
         Logger.d("sdl mirror: projection stopped (screen off?) — stopping video, keeping session")
+        stopDash()
         try {
             val vsm = sdlManager?.videoStreamManager
             if (vsm != null && vsm.isStreaming) vsm.stopStreaming()
@@ -364,6 +423,10 @@ class SdlService : Service() {
             Logger.e("sdl: stopStreaming err", t)
         }
         ProjectionHolder.projection = null
+        // The grant is single-use on Android 14+: reusing it to restart video throws a SecurityException
+        // from startForeground(mediaProjection). Drop it so a new Start mirroring asks again.
+        ProjectionHolder.resultCode = 0
+        ProjectionHolder.resultData = null
         mirrorMode = false
         videoStarted = false // allow video to restart if the user grants capture again
         releaseWakeLock()
@@ -398,7 +461,84 @@ class SdlService : Service() {
         wakeLock = null
     }
 
+    /**
+     * Dedicated dash (Settings → Dash): while the phone is locked, stream the foreground app from the
+     * shell helper's trusted display instead of the mirror, which goes dark with the screen. Same
+     * helper as the NaviLite dash mode; needs the one-time Wireless debugging setup.
+     */
+    private fun startDash(params: VideoStreamingParameters?) {
+        val settings = AndroidSettingsStore(this)
+        if (dashFeed != null || !settings.dashEnabled()) return
+        val width = params?.resolution?.resolutionWidth ?: DEFAULT_VIDEO_WIDTH
+        val height = params?.resolution?.resolutionHeight ?: DEFAULT_VIDEO_HEIGHT
+        // The helper renders 2:1; keep that aspect inside the dash's video size (the display letterboxes).
+        val outWidth = minOf(width, height * 2)
+        val outHeight = outWidth / 2
+        val feed = SdlDashFeed(
+            DashStreamScreenSource(this, settings.dashDpi(), settings.dashMargins(), settings.dashMarginColor()),
+            ::onDashDemoted,
+        )
+        feed.start(outWidth, outHeight)
+        dashFeed = feed
+        SdlDashFeed.current = feed
+        dashLock = DashLockSwitcher(this, scope, feed, holdOnDash = { projectionLost && !stopping }) {
+            settings.dashAppPackage()?.let { packageManager.getLaunchIntentForPackage(it)?.component?.flattenToString() }
+        }.also { it.start() }
+        val resolution = settings.dashResolution()
+        Logger.d("sdl dash: enabled — helper ${resolution.width}x${resolution.height} -> ${outWidth}x$outHeight on lock")
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                // Respawn when ADB is reachable so the helper runs this APK's code (it outlives app
+                // updates); falls back to a running helper when it isn't.
+                DashHelper.ensureRunning(this@SdlService, DashHelper.DEFAULT_QUALITY, resolution)
+            }.onFailure { Logger.e("sdl dash: helper unavailable — screen-off streaming disabled", it) }
+            DashHelper.startWatchdog(this@SdlService, DashHelper.DEFAULT_QUALITY, resolution)
+        }
+    }
+
+    /**
+     * App moved back to the phone. With a dead capture this only happens on a forced return (holdOnDash
+     * keeps it on the dash otherwise), and the mirror can't resume until Start.
+     */
+    private fun onDashDemoted() {
+        if (!projectionLost) return
+        projectionLost = false
+        Handler(Looper.getMainLooper()).post { stopMirrorVideo() }
+    }
+
+    /**
+     * The user granted capture again while the app was held on the dash: tear the dash stream down and
+     * restart the phone mirror with the new grant (ensureProjection already turned it into a projection).
+     */
+    private fun resumeMirrorAfterLoss() {
+        Logger.d("sdl mirror: new capture grant — leaving the dash, mirroring the phone again")
+        projectionLost = false
+        stopDash()
+        runCatching {
+            val vsm = sdlManager?.videoStreamManager
+            if (vsm != null && vsm.isStreaming) vsm.stopStreaming()
+        }.onFailure { Logger.e("sdl: stopStreaming err", it) }
+        videoStarted = false
+        maybeStartVideo()
+    }
+
+    private fun stopDash() {
+        val feed = dashFeed ?: return
+        dashFeed = null
+        SdlDashFeed.current = null
+        dashLock?.stop()
+        dashLock = null
+        DashHelper.stopWatchdog() // stop first, so it doesn't respawn the helper we're tearing down
+        // The helper is detached and outlives us; QUIT over loopback works offline, pkill is a backup.
+        Thread {
+            feed.quit()
+            runCatching { PillionAdb.getInstance(this).runShell("pkill -f app.pillion.server.DashServer") }
+        }.start()
+    }
+
     override fun onDestroy() {
+        stopDash()
+        scope.cancel()
         releaseWakeLock()
         sdlManager?.dispose()
         sdlManager = null
@@ -444,6 +584,11 @@ class SdlService : Service() {
         const val APP_ID_GARMIN = "7a5f3f25-8b82-4e0f-a173-80aefee79897"
 
         private const val APP_NAME = "Pillion"
+        private const val DEFAULT_VIDEO_WIDTH = 640
+        private const val DEFAULT_VIDEO_HEIGHT = 360
+        private const val PROMOTION_WAIT_MS = 5_000L // capture ends at lock; SCREEN_OFF promotion follows
+        private const val HELD_ON_DASH_MESSAGE =
+            "The map stays on the bike dash. Tap Start mirroring to show the phone screen again."
         private const val CHANNEL_ID = "pillion-sdl"
     }
 }
