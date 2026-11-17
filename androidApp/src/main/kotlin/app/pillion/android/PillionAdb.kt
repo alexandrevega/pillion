@@ -2,6 +2,7 @@ package app.pillion.android
 
 import android.content.Context
 import android.os.Build
+import app.pillion.core.Logger
 import io.github.muntashirakon.adb.AbsAdbConnectionManager
 import io.github.muntashirakon.adb.AdbStream
 import java.io.File
@@ -155,18 +156,25 @@ class PillionAdb private constructor(
         private fun build(context: Context): PillionAdb {
             val keyFile = File(context.filesDir, "adb_key.pk8")
             val certFile = File(context.filesDir, "adb_cert.der")
-            return if (keyFile.exists() && certFile.exists()) {
-                val key = KeyFactory.getInstance("RSA")
-                    .generatePrivate(PKCS8EncodedKeySpec(keyFile.readBytes()))
-                val cert = CertificateFactory.getInstance("X.509")
-                    .generateCertificate(certFile.inputStream().buffered()) as X509Certificate
-                PillionAdb(key, cert)
-            } else {
-                val (key, cert) = generateKeyPairAndCert()
-                keyFile.writeBytes(PKCS8EncodedKeySpec(key.encoded).encoded)
-                certFile.writeBytes(cert.encoded)
-                PillionAdb(key, cert)
+            if (keyFile.exists() && certFile.exists()) {
+                // A write cut short (e.g. full storage) leaves empty files; regenerate rather than throw
+                // forever — the phone just needs pairing again.
+                loadKeyAndCert(keyFile, certFile)
+                    .onSuccess { (key, cert) -> return PillionAdb(key, cert) }
+                    .onFailure { Logger.e("adb: stored key unreadable, generating a new one (re-pair needed)", it) }
             }
+            val (key, cert) = generateKeyPairAndCert()
+            keyFile.writeBytes(PKCS8EncodedKeySpec(key.encoded).encoded)
+            certFile.writeBytes(cert.encoded)
+            return PillionAdb(key, cert)
+        }
+
+        private fun loadKeyAndCert(keyFile: File, certFile: File) = runCatching {
+            val key = KeyFactory.getInstance("RSA")
+                .generatePrivate(PKCS8EncodedKeySpec(keyFile.readBytes()))
+            val cert = CertificateFactory.getInstance("X.509")
+                .generateCertificate(certFile.inputStream().buffered()) as X509Certificate
+            key to cert
         }
 
         /** Generate an RSA keypair + self-signed X509 cert in the shape adbd's TLS handshake expects. */
